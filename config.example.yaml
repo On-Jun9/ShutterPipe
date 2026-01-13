@@ -1,0 +1,39 @@
+source: /Volumes/SD_CARD
+dest: /Volumes/NAS/Photos
+
+include_extensions:
+  - jpg
+  - jpeg
+  - heic
+  - heif
+  - png
+  - raw
+  - arw
+  - cr2
+  - nef
+  - dng
+  - mp4
+  - mov
+  - avi
+  - mkv
+  - mxf
+
+jobs: 0
+
+dedup_method: name-size
+
+conflict_policy: skip
+
+unclassified_dir: unclassified
+
+quarantine_dir: quarantine
+
+state_file: ~/.shutterpipe/state.json
+
+log_file: ~/.shutterpipe/shutterpipe.log
+
+log_json: false
+
+dry_run: false
+
+hash_verify: false

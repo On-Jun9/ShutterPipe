@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ShutterPipe - 사진/영상 자동 백업</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="css/variables.css">
+    <link rel="stylesheet" href="css/base.css">
+    <link rel="stylesheet" href="css/layout.css">
+    <link rel="stylesheet" href="css/forms.css">
+    <link rel="stylesheet" href="css/progress.css">
+    <link rel="stylesheet" href="css/log.css">
+    <link rel="stylesheet" href="css/preset.css">
+</head>
+<body>
+    <!-- 프리셋 관리 버튼 (우측 상단 고정) -->
+    <button class="preset-toggle-btn" onclick="togglePresetSidebar()" title="프리셋 관리">
+        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"></path>
+            <circle cx="12" cy="12" r="3"></circle>
+        </svg>
+    </button>
+
+    <!-- 프리셋 사이드바 -->
+    <div id="presetSidebar" class="preset-sidebar">
+        <div class="preset-sidebar-header">
+            <h2>프리셋 관리</h2>
+            <button class="preset-close-btn" onclick="togglePresetSidebar()">&times;</button>
+        </div>
+        <div class="preset-sidebar-content">
+            <!-- 프리셋 목록 -->
+            <div id="presetList" class="preset-list">
+                <p class="preset-empty-message">저장된 프리셋이 없습니다</p>
+            </div>
+
+            <!-- 저장 다이얼로그 -->
+            <div id="savePresetDialog" class="preset-save-dialog" style="display: none;">
+                <h3>새 프리셋 저장</h3>
+                <div class="preset-form-group">
+                    <label>프리셋 이름</label>
+                    <input type="text" id="presetName" class="input-modern" placeholder="예: 일상 촬영">
+                </div>
+                <div class="preset-form-group">
+                    <label>설명 (선택)</label>
+                    <input type="text" id="presetDescription" class="input-modern" placeholder="예: 날짜별 분류, 중복 검사">
+                </div>
+                <div class="preset-form-actions">
+                    <button onclick="savePreset()" class="btn-primary">저장</button>
+                    <button onclick="hideSavePresetDialog()" class="btn-secondary">취소</button>
+                </div>
+            </div>
+
+            <!-- 액션 버튼 -->
+            <div class="preset-actions">
+                <button onclick="showSavePresetDialog()" class="btn-action btn-save">
+                    현재 설정 저장
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 사이드바 백드롭 -->
+    <div id="presetBackdrop" class="preset-backdrop" onclick="togglePresetSidebar()"></div>
+
+    <div class="container-modern">
+        <header class="fade-in" style="text-align: center; margin-bottom: 48px;">
+            <h1 class="header-title">📸 ShutterPipe</h1>
+            <p style="color: #475569; font-size: 18px; margin-top: 12px; font-weight: 500;">촬영일시 기준 사진/영상 자동 백업 및 분류</p>
+        </header>
+
+        <div class="glass-card fade-in" style="padding: 32px; margin-bottom: 24px; border-radius: 20px;">
+            <h2 class="section-title" style="margin-bottom: 24px;">경로 설정</h2>
+
+            <div style="margin-bottom: 20px;">
+                <label class="label-text">원본 경로 (SD 카드)</label>
+                <div class="path-input-group">
+                    <div class="path-input-wrapper">
+                        <input type="text" id="source" class="input-modern"
+                               placeholder="/Volumes/SD_CARD"
+                               oninput="handlePathInput(this, 'source')"
+                               onchange="saveSettings()"
+                               autocomplete="off">
+                        <div id="source-autocomplete" class="autocomplete-dropdown" style="display: none;"></div>
+                    </div>
+                    <button class="btn-bookmark" onclick="toggleBookmark('source')" title="북마크">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon>
+                        </svg>
+                    </button>
+                    <div style="position: relative;">
+                        <button class="btn-bookmark" onclick="toggleBookmarkDropdown('source')" title="북마크 목록">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+                            </svg>
+                        </button>
+                        <div id="source-bookmarks" class="bookmark-dropdown" style="display: none;"></div>
+                    </div>
+                </div>
+            </div>
+
+            <div>
+                <label class="label-text">목적지 (NAS)</label>
+                <div class="path-input-group">
+                    <div class="path-input-wrapper">
+                        <input type="text" id="dest" class="input-modern"
+                               placeholder="/Volumes/NAS/Photos"
+                               oninput="handlePathInput(this, 'dest')"
+                               onchange="saveSettings()"
+                               autocomplete="off">
+                        <div id="dest-autocomplete" class="autocomplete-dropdown" style="display: none;"></div>
+                    </div>
+                    <button class="btn-bookmark" onclick="toggleBookmark('dest')" title="북마크">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon>
+                        </svg>
+                    </button>
+                    <div style="position: relative;">
+                        <button class="btn-bookmark" onclick="toggleBookmarkDropdown('dest')" title="북마크 목록">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+                            </svg>
+                        </button>
+                        <div id="dest-bookmarks" class="bookmark-dropdown" style="display: none;"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="glass-card fade-in settings-container">
+            <h2 class="section-title" style="margin-bottom: 24px;">설정</h2>
+
+            <!-- 탭 라디오 버튼 (숨김) -->
+            <input type="radio" name="settings-tab" id="tab-basic" class="tab-radio" checked>
+            <input type="radio" name="settings-tab" id="tab-advanced" class="tab-radio">
+
+            <!-- 탭 헤더 -->
+            <div class="tab-header">
+                <label for="tab-basic" class="tab-label">기본 설정</label>
+                <label for="tab-advanced" class="tab-label">고급 설정</label>
+            </div>
+
+            <!-- 기본 설정 탭 -->
+            <div id="basic-settings" class="tab-content">
+                <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px; margin-bottom: 20px;">
+                    <div>
+                        <label class="label-text">분류 방식</label>
+                        <select id="organizeStrategy" class="select-modern" onchange="toggleEventNameInput(); saveSettings();">
+                            <option value="date">날짜별 (YYYY/MM/DD)</option>
+                            <option value="event">이벤트별 (YYYY/날짜-이벤트명/파일타입)</option>
+                        </select>
+                    </div>
+
+                    <div id="eventNameContainer" style="display: none;">
+                        <label class="label-text">이벤트명 (선택)</label>
+                        <input type="text" id="eventName" class="input-modern"
+                               placeholder="예: 일상 촬영, 여행, 행사" onchange="saveSettings()">
+                    </div>
+
+                    <div>
+                        <label class="label-text">충돌 정책</label>
+                        <select id="conflictPolicy" class="select-modern" onchange="saveSettings()">
+                            <option value="skip">Skip (건너뛰기)</option>
+                            <option value="rename">Rename (이름 변경)</option>
+                            <option value="overwrite">Overwrite (덮어쓰기)</option>
+                            <option value="quarantine">Quarantine (격리)</option>
+                        </select>
+                    </div>
+
+                    <div>
+                        <label class="label-text">중복 검사 방법</label>
+                        <select id="dedupMethod" class="select-modern" onchange="saveSettings()">
+                            <option value="name-size">이름 + 크기</option>
+                            <option value="hash">해시 (느림, 정확)</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div style="display: flex; gap: 24px; flex-wrap: wrap;">
+                    <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                        <input type="checkbox" id="dryRun" class="checkbox-modern" onchange="saveSettings()">
+                        <span style="font-size: 15px; color: var(--color-text-secondary); font-weight: 500;">Dry Run (시뮬레이션)</span>
+                    </label>
+                    <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                        <input type="checkbox" id="hashVerify" class="checkbox-modern" onchange="saveSettings()">
+                        <span style="font-size: 15px; color: var(--color-text-secondary); font-weight: 500;">해시 검증</span>
+                    </label>
+                    <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                        <input type="checkbox" id="ignoreState" class="checkbox-modern" onchange="saveSettings()">
+                        <span style="font-size: 15px; color: var(--color-text-secondary); font-weight: 500;">이전 기록 무시 (전체 다시 수행)</span>
+                    </label>
+                </div>
+            </div>
+
+            <!-- 고급 설정 탭 -->
+            <div id="advanced-settings" class="tab-content">
+                <!-- Jobs (병렬 워커 수) -->
+                <div>
+                    <label class="label-text">
+                        병렬 워커 수 (Jobs)
+                        <span class="help-text">동시 처리 파일 개수 (0=자동, 1-32=수동 지정)</span>
+                    </label>
+                    <input type="number" id="jobs" class="input-modern"
+                           min="0" max="32" value="0"
+                           placeholder="0 (자동 설정)"
+                           onchange="saveSettings()">
+                </div>
+
+                <!-- Include Extensions -->
+                <div>
+                    <label class="label-text">
+                        포함할 파일 확장자
+                        <span class="help-text">쉼표 또는 스페이스로 구분 (예: jpg, png, mp4)</span>
+                    </label>
+                    <div id="extensionTagsContainer" class="tags-container"></div>
+                    <input type="text" id="extensionInput" class="input-modern"
+                           placeholder="확장자 입력 후 Enter (예: jpg)"
+                           onkeydown="handleExtensionInput(event)">
+                </div>
+
+                <!-- Custom Folders -->
+                <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px;">
+                    <div>
+                        <label class="label-text">
+                            분류 불가 폴더명
+                            <span class="help-text">메타데이터가 없는 파일이 저장되는 폴더</span>
+                        </label>
+                        <input type="text" id="unclassifiedDir" class="input-modern"
+                               placeholder="unclassified"
+                               onchange="saveSettings()">
+                    </div>
+                    <div>
+                        <label class="label-text">
+                            격리 폴더명
+                            <span class="help-text">충돌 시 격리 정책 선택 시 사용되는 폴더</span>
+                        </label>
+                        <input type="text" id="quarantineDir" class="input-modern"
+                               placeholder="quarantine"
+                               onchange="saveSettings()">
+                    </div>
+                </div>
+
+                <!-- Logging Options -->
+                <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px;">
+                    <div>
+                        <label class="label-text">
+                            상태 파일 경로 (선택)
+                            <span class="help-text">비워두면 기본: ~/.shutterpipe/state.json</span>
+                        </label>
+                        <input type="text" id="stateFile" class="input-modern"
+                               placeholder="~/.shutterpipe/state.json"
+                               oninput="cleanPath(this)"
+                               onchange="saveSettings()">
+                    </div>
+                    <div>
+                        <label class="label-text">
+                            로그 파일 경로 (선택)
+                            <span class="help-text">비워두면 기본: ~/.shutterpipe/shutterpipe.log</span>
+                        </label>
+                        <input type="text" id="logFile" class="input-modern"
+                               placeholder="~/.shutterpipe/shutterpipe.log"
+                               oninput="cleanPath(this)"
+                               onchange="saveSettings()">
+                    </div>
+                </div>
+
+                <div>
+                    <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                        <input type="checkbox" id="logJson" class="checkbox-modern" onchange="saveSettings()">
+                        <span style="font-size: 15px; color: var(--color-text-secondary); font-weight: 500;">
+                            JSON 형식 로그
+                            <span class="help-text">로그를 JSON 형식으로 저장 (파싱 용이)</span>
+                        </span>
+                    </label>
+                </div>
+            </div>
+        </div>
+
+        <div style="margin-bottom: 24px;" class="fade-in" style="animation-delay: 0.2s;">
+            <button id="startBtn" onclick="startBackup()" class="btn-success">
+                백업 시작
+            </button>
+        </div>
+
+        <div id="progressSection" class="glass-card fade-in" style="padding: 32px; border-radius: 20px; display: none;">
+            <h2 class="section-title" style="margin-bottom: 24px;">진행 상황</h2>
+            
+            <div style="margin-bottom: 24px;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+                    <span id="progressText" class="progress-text">준비 중...</span>
+                    <span id="progressPercent" class="progress-percent">0%</span>
+                </div>
+                <div class="progress-bar-container">
+                    <div id="progressBar" class="progress-bar" style="width: 0%"></div>
+                </div>
+            </div>
+
+            <div id="fileList" class="file-list-container" style="padding: 16px;">
+                <p style="font-size: 14px; color: var(--color-text-tertiary); text-align: center;">파일 처리 목록이 여기에 표시됩니다...</p>
+            </div>
+
+            <div style="margin-top: 16px;">
+                <div style="display: flex; gap: 8px;">
+                    <button onclick="toggleLogViewer()" class="btn-small" style="flex: 1; display: flex; justify-content: space-between; align-items: center;">
+                        <span>📜 상세 로그</span>
+                        <span id="logToggleIcon">▼</span>
+                    </button>
+                    <button onclick="copyLogToClipboard()" class="btn-small" style="width: auto;" title="로그 복사">
+                        📋
+                    </button>
+                </div>
+                <div id="logViewer" class="log-viewer" style="display: none;">
+                    <div id="logContent" class="log-content"></div>
+                </div>
+            </div>
+        </div>
+
+        <div id="summarySection" class="glass-card fade-in" style="padding: 32px; border-radius: 20px; margin-top: 24px; display: none;">
+            <h2 class="section-title" style="margin-bottom: 24px;">완료 요약</h2>
+            <div id="summaryContent" class="summary-grid"></div>
+        </div>
+    </div>
+
+    <script src="js/core.js"></script>
+    <script src="js/log.js"></script>
+    <script src="js/extensions.js"></script>
+    <script src="js/settings.js"></script>
+    <script src="js/path-autocomplete.js"></script>
+    <script src="js/backup.js"></script>
+    <script src="js/preset.js"></script>

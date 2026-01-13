@@ -1,0 +1,21 @@
+# Logs
+*.log
+nohup.out
+
+# Binary
+bin/
+shutterpipe.pid
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test files
+*.tmp
