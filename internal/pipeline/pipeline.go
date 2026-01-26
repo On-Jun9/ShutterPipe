@@ -63,6 +63,43 @@ func (p *Pipeline) SetProgressCallback(cb ProgressCallback) {
 	p.progressCallback = cb
 }
 
+// shouldIncludeByDate checks if a file should be included based on date filter.
+// Uses EXIF capture time if available, otherwise falls back to file modification time.
+// Compares dates only (YYYY-MM-DD), ignoring time and timezone.
+func (p *Pipeline) shouldIncludeByDate(entry types.FileEntry, meta types.MediaMetadata) bool {
+	// No filter configured
+	if p.cfg.DateFilterStart == "" && p.cfg.DateFilterEnd == "" {
+		return true
+	}
+
+	// Determine the date to check: EXIF capture time (preferred) or file mod time (fallback)
+	var checkDate time.Time
+	if meta.CaptureTime != nil {
+		checkDate = *meta.CaptureTime
+	} else {
+		checkDate = entry.ModTime
+	}
+
+	// Format as YYYY-MM-DD for comparison (timezone-agnostic)
+	checkDateStr := checkDate.Format("2006-01-02")
+
+	// Check start date (inclusive)
+	if p.cfg.DateFilterStart != "" {
+		if checkDateStr < p.cfg.DateFilterStart {
+			return false
+		}
+	}
+
+	// Check end date (inclusive)
+	if p.cfg.DateFilterEnd != "" {
+		if checkDateStr > p.cfg.DateFilterEnd {
+			return false
+		}
+	}
+
+	return true
+}
+
 func (p *Pipeline) Run() (*types.RunSummary, error) {
 	startTime := time.Now()
 
@@ -97,6 +134,7 @@ func (p *Pipeline) Run() (*types.RunSummary, error) {
 
 	var tasks []types.CopyTask
 	var unclassifiedCount int
+	var filteredCount int
 
 	fmt.Printf("DEBUG: Starting loop for %d entries\n", len(entries)) // DEBUG
 	for i, entry := range entries {
@@ -118,6 +156,13 @@ func (p *Pipeline) Run() (*types.RunSummary, error) {
 		}
 
 		meta := p.meta.Extract(entry)
+
+		// Date filter check (EXIF preferred, file mod time fallback)
+		if !p.shouldIncludeByDate(entry, meta) {
+			continue
+		}
+
+		filteredCount++
 		task := p.planner.Plan(entry, meta)
 
 		if meta.CaptureTime == nil {
@@ -157,7 +202,8 @@ func (p *Pipeline) Run() (*types.RunSummary, error) {
 	}
 
 	summary := &types.RunSummary{
-		TotalFiles:   len(entries),
+		ScannedFiles: len(entries),
+		TotalFiles:   filteredCount,
 		Unclassified: unclassifiedCount,
 		StartTime:    startTime,
 	}

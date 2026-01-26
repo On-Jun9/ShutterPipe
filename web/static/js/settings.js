@@ -18,6 +18,10 @@ function loadSettings() {
         document.getElementById('hashVerify').checked = config.hash_verify || false;
         document.getElementById('ignoreState').checked = config.ignore_state || false;
 
+        // 날짜 필터
+        document.getElementById('dateFilterStart').value = config.date_filter_start || '';
+        document.getElementById('dateFilterEnd').value = config.date_filter_end || '';
+
         // 고급 설정
         document.getElementById('jobs').value = config.jobs || 0;
         document.getElementById('unclassifiedDir').value = config.unclassified_dir || 'unclassified';
@@ -38,11 +42,16 @@ function loadSettings() {
 
         // 이벤트명 입력 필드 표시/숨김
         toggleEventNameInput();
+
+        // 날짜 필터 버튼 상태 업데이트
+        updateDateFilterButtons();
     } else {
         // 기본값 로드 시에도 태그 렌더링
         if (typeof renderExtensionTags === 'function') {
             renderExtensionTags();
         }
+        // 날짜 필터 버튼 상태 업데이트
+        updateDateFilterButtons();
     }
 
     // 경로 히스토리 로드
@@ -84,6 +93,10 @@ function saveSettings() {
         hash_verify: document.getElementById('hashVerify').checked,
         ignore_state: document.getElementById('ignoreState').checked,
 
+        // 날짜 필터
+        date_filter_start: document.getElementById('dateFilterStart').value || null,
+        date_filter_end: document.getElementById('dateFilterEnd').value || null,
+
         // 고급 설정
         jobs: jobsValue,
         include_extensions: includeExtensions,
@@ -106,6 +119,73 @@ function toggleEventNameInput() {
     } else {
         eventNameContainer.style.display = 'none';
     }
+}
+
+// 날짜 필터 설정 (빠른 선택)
+function setDateFilter(mode) {
+    const today = new Date();
+    const startInput = document.getElementById('dateFilterStart');
+    const endInput = document.getElementById('dateFilterEnd');
+
+    if (mode === 'all') {
+        // 전체: 필터 없음
+        startInput.value = '';
+        endInput.value = '';
+    } else if (mode === 'today') {
+        // 오늘
+        const dateStr = today.toISOString().split('T')[0];
+        startInput.value = dateStr;
+        endInput.value = dateStr;
+    } else if (mode === 'week') {
+        // 최근 7일
+        const weekAgo = new Date(today);
+        weekAgo.setDate(today.getDate() - 7);
+        startInput.value = weekAgo.toISOString().split('T')[0];
+        endInput.value = today.toISOString().split('T')[0];
+    } else if (mode === 'month') {
+        // 최근 30일
+        const monthAgo = new Date(today);
+        monthAgo.setDate(today.getDate() - 30);
+        startInput.value = monthAgo.toISOString().split('T')[0];
+        endInput.value = today.toISOString().split('T')[0];
+    }
+
+    saveSettings();
+    updateDateFilterButtons();
+}
+
+// 날짜 필터 버튼 상태 업데이트
+function updateDateFilterButtons() {
+    const startInput = document.getElementById('dateFilterStart');
+    const endInput = document.getElementById('dateFilterEnd');
+    const startDate = startInput.value;
+    const endDate = endInput.value;
+
+    const today = new Date().toISOString().split('T')[0];
+    const weekAgo = new Date();
+    weekAgo.setDate(weekAgo.getDate() - 7);
+    const weekAgoStr = weekAgo.toISOString().split('T')[0];
+    const monthAgo = new Date();
+    monthAgo.setDate(monthAgo.getDate() - 30);
+    const monthAgoStr = monthAgo.toISOString().split('T')[0];
+
+    const buttons = document.querySelectorAll('.btn-date-filter');
+    buttons.forEach(btn => btn.classList.remove('active'));
+
+    if (!startDate && !endDate) {
+        // 전체
+        buttons[3].classList.add('active');
+    } else if (startDate === today && endDate === today) {
+        // 오늘
+        buttons[0].classList.add('active');
+    } else if (startDate === weekAgoStr && endDate === today) {
+        // 최근 7일
+        buttons[1].classList.add('active');
+    } else if (startDate === monthAgoStr && endDate === today) {
+        // 최근 30일
+        buttons[2].classList.add('active');
+    }
+    // 사용자 정의 날짜인 경우 버튼 활성화 안함
 }
 
 // 페이지 로드 시 설정 로드

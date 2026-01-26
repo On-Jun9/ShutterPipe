@@ -48,6 +48,8 @@ func ConfigToPreset(cfg *Config, name, description string) *types.ConfigPreset {
 		DryRun:            cfg.DryRun,
 		HashVerify:        cfg.HashVerify,
 		IgnoreState:       cfg.IgnoreState,
+		DateFilterStart:   cfg.DateFilterStart,
+		DateFilterEnd:     cfg.DateFilterEnd,
 		CreatedAt:         time.Now(),
 	}
 }
@@ -68,6 +70,8 @@ func PresetToConfig(preset *types.ConfigPreset) *Config {
 	cfg.DryRun = preset.DryRun
 	cfg.HashVerify = preset.HashVerify
 	cfg.IgnoreState = preset.IgnoreState
+	cfg.DateFilterStart = preset.DateFilterStart
+	cfg.DateFilterEnd = preset.DateFilterEnd
 	return cfg
 }
 
