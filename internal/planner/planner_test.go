@@ -9,7 +9,7 @@ import (
 )
 
 func TestPlanner_Plan_WithCaptureTime(t *testing.T) {
-	p := New("/dest", "unclassified")
+	p := New("/dest", "unclassified", types.OrganizeByDate, "")
 
 	captureTime := time.Date(2025, 12, 31, 15, 30, 0, 0, time.Local)
 	entry := types.FileEntry{
@@ -35,7 +35,7 @@ func TestPlanner_Plan_WithCaptureTime(t *testing.T) {
 }
 
 func TestPlanner_Plan_WithoutCaptureTime(t *testing.T) {
-	p := New("/dest", "unclassified")
+	p := New("/dest", "unclassified", types.OrganizeByDate, "")
 
 	entry := types.FileEntry{
 		Path: "/source/photo.jpg",

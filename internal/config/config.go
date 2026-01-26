@@ -10,22 +10,24 @@ import (
 )
 
 type Config struct {
-	Source            string                  `yaml:"source" json:"source"`
-	Dest              string                  `yaml:"dest" json:"dest"`
-	IncludeExtensions []string                `yaml:"include_extensions" json:"include_extensions"`
-	Jobs              int                     `yaml:"jobs" json:"jobs"`
-	DedupMethod       types.DedupMethod       `yaml:"dedup_method" json:"dedup_method"`
-	ConflictPolicy    types.ConflictPolicy    `yaml:"conflict_policy" json:"conflict_policy"`
-	OrganizeStrategy  types.OrganizeStrategy  `yaml:"organize_strategy" json:"organize_strategy"`
-	EventName         string                  `yaml:"event_name" json:"event_name"`
-	UnclassifiedDir   string                  `yaml:"unclassified_dir" json:"unclassified_dir"`
-	QuarantineDir     string                  `yaml:"quarantine_dir" json:"quarantine_dir"`
-	StateFile         string                  `yaml:"state_file" json:"state_file"`
-	LogFile           string                  `yaml:"log_file" json:"log_file"`
-	LogJSON           bool                    `yaml:"log_json" json:"log_json"`
-	DryRun            bool                    `yaml:"dry_run" json:"dry_run"`
-	HashVerify        bool                    `yaml:"hash_verify" json:"hash_verify"`
-	IgnoreState       bool                    `yaml:"ignore_state" json:"ignore_state"`
+	Source            string                 `yaml:"source" json:"source"`
+	Dest              string                 `yaml:"dest" json:"dest"`
+	IncludeExtensions []string               `yaml:"include_extensions" json:"include_extensions"`
+	Jobs              int                    `yaml:"jobs" json:"jobs"`
+	DedupMethod       types.DedupMethod      `yaml:"dedup_method" json:"dedup_method"`
+	ConflictPolicy    types.ConflictPolicy   `yaml:"conflict_policy" json:"conflict_policy"`
+	OrganizeStrategy  types.OrganizeStrategy `yaml:"organize_strategy" json:"organize_strategy"`
+	EventName         string                 `yaml:"event_name" json:"event_name"`
+	UnclassifiedDir   string                 `yaml:"unclassified_dir" json:"unclassified_dir"`
+	QuarantineDir     string                 `yaml:"quarantine_dir" json:"quarantine_dir"`
+	StateFile         string                 `yaml:"state_file" json:"state_file"`
+	LogFile           string                 `yaml:"log_file" json:"log_file"`
+	LogJSON           bool                   `yaml:"log_json" json:"log_json"`
+	DryRun            bool                   `yaml:"dry_run" json:"dry_run"`
+	HashVerify        bool                   `yaml:"hash_verify" json:"hash_verify"`
+	IgnoreState       bool                   `yaml:"ignore_state" json:"ignore_state"`
+	DateFilterStart   string                 `yaml:"date_filter_start,omitempty" json:"date_filter_start,omitempty"`
+	DateFilterEnd     string                 `yaml:"date_filter_end,omitempty" json:"date_filter_end,omitempty"`
 }
 
 func DefaultConfig() *Config {

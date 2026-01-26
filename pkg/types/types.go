@@ -103,6 +103,7 @@ const (
 
 // RunSummary contains statistics for a completed run.
 type RunSummary struct {
+	ScannedFiles   int
 	TotalFiles     int
 	Copied         int
 	Skipped        int
@@ -120,20 +121,22 @@ type RunSummary struct {
 
 // ConfigPreset represents a saved configuration preset.
 type ConfigPreset struct {
-	Name              string            `json:"name"`
-	Description       string            `json:"description,omitempty"`
-	Source            string            `json:"source,omitempty"`
-	Dest              string            `json:"dest,omitempty"`
-	IncludeExtensions []string          `json:"include_extensions"`
-	Jobs              int               `json:"jobs"`
-	DedupMethod       DedupMethod       `json:"dedup_method"`
-	ConflictPolicy    ConflictPolicy    `json:"conflict_policy"`
-	OrganizeStrategy  OrganizeStrategy  `json:"organize_strategy"`
-	EventName         string            `json:"event_name,omitempty"`
-	UnclassifiedDir   string            `json:"unclassified_dir"`
-	QuarantineDir     string            `json:"quarantine_dir"`
-	DryRun            bool              `json:"dry_run"`
-	HashVerify        bool              `json:"hash_verify"`
-	IgnoreState       bool              `json:"ignore_state"`
-	CreatedAt         time.Time         `json:"created_at"`
+	Name              string           `json:"name"`
+	Description       string           `json:"description,omitempty"`
+	Source            string           `json:"source,omitempty"`
+	Dest              string           `json:"dest,omitempty"`
+	IncludeExtensions []string         `json:"include_extensions"`
+	Jobs              int              `json:"jobs"`
+	DedupMethod       DedupMethod      `json:"dedup_method"`
+	ConflictPolicy    ConflictPolicy   `json:"conflict_policy"`
+	OrganizeStrategy  OrganizeStrategy `json:"organize_strategy"`
+	EventName         string           `json:"event_name,omitempty"`
+	UnclassifiedDir   string           `json:"unclassified_dir"`
+	QuarantineDir     string           `json:"quarantine_dir"`
+	DryRun            bool             `json:"dry_run"`
+	HashVerify        bool             `json:"hash_verify"`
+	IgnoreState       bool             `json:"ignore_state"`
+	DateFilterStart   string           `json:"date_filter_start,omitempty"`
+	DateFilterEnd     string           `json:"date_filter_end,omitempty"`
+	CreatedAt         time.Time        `json:"created_at"`
 }

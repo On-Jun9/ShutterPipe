@@ -28,6 +28,10 @@ async function startBackup() {
 
     addLogEntry(`설정 확인: Source=${source}, Dest=${dest}`, 'info');
 
+    // 날짜 필터 (날짜만 전송, 타임존 없음)
+    const dateFilterStart = document.getElementById('dateFilterStart').value;
+    const dateFilterEnd = document.getElementById('dateFilterEnd').value;
+
     const config = {
         source: source,
         dest: dest,
@@ -38,6 +42,10 @@ async function startBackup() {
         dry_run: document.getElementById('dryRun').checked,
         hash_verify: document.getElementById('hashVerify').checked,
         ignore_state: document.getElementById('ignoreState').checked,
+
+        // 날짜 필터 (YYYY-MM-DD 형식, 타임존 무시하고 날짜만 비교)
+        date_filter_start: dateFilterStart || null,
+        date_filter_end: dateFilterEnd || null,
 
         // 고급 설정
         include_extensions: includeExtensions,
@@ -78,6 +86,14 @@ async function startBackup() {
 
         isRunning = true;
         document.getElementById('startBtn').disabled = true;
+
+        // 진행 상황 초기화
+        document.getElementById('progressBar').style.width = '0%';
+        document.getElementById('progressBar').classList.remove('pulse');
+        document.getElementById('progressPercent').textContent = '0%';
+        document.getElementById('progressText').textContent = '준비 중...';
+        document.getElementById('fileList').innerHTML = '<p style="font-size: 14px; color: var(--color-text-tertiary); text-align: center;">파일 처리 목록이 여기에 표시됩니다...</p>';
+
         document.getElementById('progressSection').style.display = 'block';
         document.getElementById('summarySection').style.display = 'none';
 
@@ -301,7 +317,11 @@ function showSummary(summary) {
             <h3 class="summary-section-title">파일 처리</h3>
             <div class="summary-grid">
                 <div class="summary-item" data-type="info">
-                    <div class="summary-label">전체 파일</div>
+                    <div class="summary-label">스캔됨</div>
+                    <div class="summary-value">${summary.ScannedFiles}</div>
+                </div>
+                <div class="summary-item" data-type="info">
+                    <div class="summary-label">처리 대상</div>
                     <div class="summary-value">${summary.TotalFiles}</div>
                 </div>
                 <div class="summary-item" data-type="success">

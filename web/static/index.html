@@ -142,6 +142,27 @@
 
             <!-- 기본 설정 탭 -->
             <div id="basic-settings" class="tab-content">
+                <!-- 날짜 필터 -->
+                <div style="margin-bottom: 24px;">
+                    <label class="label-text">날짜 필터</label>
+                    <div style="display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap;">
+                        <button class="btn-date-filter" onclick="setDateFilter('today')">오늘</button>
+                        <button class="btn-date-filter" onclick="setDateFilter('week')">최근 7일</button>
+                        <button class="btn-date-filter" onclick="setDateFilter('month')">최근 30일</button>
+                        <button class="btn-date-filter active" onclick="setDateFilter('all')">전체</button>
+                    </div>
+                    <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px;">
+                        <div>
+                            <label class="label-text" style="font-size: 13px; margin-bottom: 4px;">시작 날짜 (선택)</label>
+                            <input type="date" id="dateFilterStart" class="input-modern" onchange="saveSettings(); updateDateFilterButtons();">
+                        </div>
+                        <div>
+                            <label class="label-text" style="font-size: 13px; margin-bottom: 4px;">종료 날짜 (선택)</label>
+                            <input type="date" id="dateFilterEnd" class="input-modern" onchange="saveSettings(); updateDateFilterButtons();">
+                        </div>
+                    </div>
+                </div>
+
                 <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px; margin-bottom: 20px;">
                     <div>
                         <label class="label-text">분류 방식</label>
