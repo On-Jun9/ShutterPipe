@@ -1,12 +1,14 @@
-# ShutterPipe
+# ShutterPipe v0.2.0
 
 사진/영상 파일을 촬영일시 기준으로 자동 백업 및 분류하는 도구
 
 ## 주요 기능
 
 - **메타데이터 기반 분류**: EXIF/XMP 데이터를 읽어 촬영 날짜별로 자동 분류
+- **날짜 필터링**: 특정 기간의 파일만 선택적으로 백업 (오늘/최근 7일/최근 30일/전체)
 - **웹 UI**: 브라우저에서 설정 및 실시간 진행 상황 확인
 - **프리셋 관리**: 자주 사용하는 설정을 저장하고 불러오기
+- **설정 영속성**: 서버 측 JSON 저장으로 다중 브라우저 간 설정 공유
 - **중복 검사**: 파일명+크기 또는 해시 기반 중복 파일 감지
 - **충돌 처리**: Skip/Rename/Overwrite/Quarantine 정책 선택
 - **경로 북마크**: 자주 사용하는 경로를 저장하여 빠른 접근
@@ -98,6 +100,8 @@ go build -o bin/shutterpipe ./cmd/shutterpipe
 - `-d, --dest`: 목적지 경로
 - `-e, --include-ext`: 포함할 확장자 목록 (예: `-e jpg -e mp4`)
 - `-j, --jobs`: 병렬 워커 수 (0=자동)
+- `--date-filter-start`: 날짜 필터 시작일 (YYYY-MM-DD)
+- `--date-filter-end`: 날짜 필터 종료일 (YYYY-MM-DD)
 - `--dedup`: `name-size` 또는 `hash`
 - `--conflict`: `skip`, `rename`, `overwrite`, `quarantine`
 - `--unclassified-dir`: 분류 불가 폴더명
@@ -122,6 +126,7 @@ go build -o bin/shutterpipe ./cmd/shutterpipe
 |------|------|--------|
 | 분류 방식 | 날짜별 또는 이벤트별 | 날짜별 |
 | 이벤트명 | 이벤트별 분류 시 폴더명에 추가 | (비어 있음) |
+| 날짜 필터 | 특정 기간 파일만 백업 (시작일~종료일) | 전체 |
 | 충돌 정책 | Skip/Rename/Overwrite/Quarantine | Skip |
 | 중복 검사 방법 | 이름+크기 또는 해시 | 이름+크기 |
 | Dry Run | 실제 복사 없이 시뮬레이션 | Off |
@@ -149,6 +154,8 @@ source: "/Volumes/SD_CARD"
 dest: "/Volumes/NAS/Photos"
 organize_strategy: "date" # date | event
 event_name: "크리스마스"
+date_filter_start: "2026-01-01" # 선택사항: 특정 기간만 백업
+date_filter_end: "2026-01-31"
 include_extensions: ["jpg", "mp4"]
 jobs: 0
 conflict_policy: "skip"
@@ -171,6 +178,29 @@ ignore_state: false
 - "현재 설정 저장" 버튼으로 저장
 - 저장된 프리셋 클릭으로 불러오기
 - 프리셋 파일 위치: `~/.shutterpipe/presets/`
+
+## 데이터 저장 위치
+
+ShutterPipe는 설정, 프리셋, 북마크, 경로 히스토리를 서버 측 JSON 파일로 저장합니다.
+
+```
+~/.shutterpipe/
+├── settings.json       # 현재 설정 (분류 방식, 충돌 정책 등)
+├── bookmarks.json      # 북마크한 경로 목록
+├── path-history.json   # 경로 자동완성 히스토리
+├── presets/            # 저장된 프리셋 파일들
+│   ├── 일상촬영.json
+│   └── 행사촬영.json
+├── state.json          # 백업 처리 이력
+└── shutterpipe.log     # 파이프라인 로그
+```
+
+### 다중 브라우저 지원
+
+설정 데이터가 서버에 저장되므로:
+- 같은 서버에 접속하는 모든 브라우저가 동일한 설정을 공유합니다.
+- 브라우저 캐시를 삭제해도 설정이 유지됩니다.
+- `~/.shutterpipe` 디렉토리를 백업하면 모든 설정을 보존할 수 있습니다.
 
 ## 서버 관리
 
