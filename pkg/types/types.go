@@ -140,3 +140,40 @@ type ConfigPreset struct {
 	DateFilterEnd     string           `json:"date_filter_end,omitempty"`
 	CreatedAt         time.Time        `json:"created_at"`
 }
+
+// UserSettings represents the current user settings (migrated from localStorage).
+type UserSettings struct {
+	Source            string           `json:"source"`
+	Dest              string           `json:"dest"`
+	OrganizeStrategy  OrganizeStrategy `json:"organize_strategy"`
+	EventName         string           `json:"event_name,omitempty"`
+	ConflictPolicy    ConflictPolicy   `json:"conflict_policy"`
+	DedupMethod       DedupMethod      `json:"dedup_method"`
+	DryRun            bool             `json:"dry_run"`
+	HashVerify        bool             `json:"hash_verify"`
+	IgnoreState       bool             `json:"ignore_state"`
+	DateFilterStart   string           `json:"date_filter_start,omitempty"`
+	DateFilterEnd     string           `json:"date_filter_end,omitempty"`
+	Jobs              int              `json:"jobs"`
+	IncludeExtensions []string         `json:"include_extensions"`
+	UnclassifiedDir   string           `json:"unclassified_dir"`
+	QuarantineDir     string           `json:"quarantine_dir"`
+	StateFile         string           `json:"state_file"`
+	LogFile           string           `json:"log_file"`
+	LogJSON           bool             `json:"log_json"`
+	UpdatedAt         time.Time        `json:"updated_at"`
+}
+
+// PathHistory stores the list of recently used paths for autocomplete.
+type PathHistory struct {
+	Source    []string  `json:"source"`
+	Dest      []string  `json:"dest"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// Bookmarks stores the user's bookmarked paths.
+type Bookmarks struct {
+	Source    []string  `json:"source"`
+	Dest      []string  `json:"dest"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
