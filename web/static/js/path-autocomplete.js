@@ -117,6 +117,7 @@ function toggleBookmark(fieldId) {
 // 북마크 드롭다운 토글
 function toggleBookmarkDropdown(fieldId) {
     const dropdown = document.getElementById(`${fieldId}-bookmarks`);
+    const button = document.getElementById(`${fieldId}-bookmark-btn`);
 
     // 다른 드롭다운 닫기
     document.querySelectorAll('.bookmark-dropdown').forEach(d => {
@@ -129,6 +130,13 @@ function toggleBookmarkDropdown(fieldId) {
         dropdown.style.display = 'none';
         return;
     }
+
+    // 버튼 위치 계산
+    const buttonRect = button.getBoundingClientRect();
+
+    // 드롭다운 위치 설정 (버튼 아래, 오른쪽 정렬)
+    dropdown.style.top = `${buttonRect.bottom + 8}px`;
+    dropdown.style.right = `${window.innerWidth - buttonRect.right}px`;
 
     // 북마크 목록 렌더링
     renderBookmarkDropdown(fieldId);
