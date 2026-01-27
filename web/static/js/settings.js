@@ -2,11 +2,10 @@
 // 설정 저장 및 로드
 
 // 설정 로드
-function loadSettings() {
-    const saved = localStorage.getItem('shutterpipe-config');
-    if (saved) {
-        const config = JSON.parse(saved);
-
+async function loadSettings() {
+    // 서버에서 설정 로드
+    const config = await loadSettingsFromServer();
+    if (config) {
         // 기본 설정
         document.getElementById('source').value = config.source || '';
         document.getElementById('dest').value = config.dest || '';
@@ -55,15 +54,15 @@ function loadSettings() {
     }
 
     // 경로 히스토리 로드
-    const savedHistory = localStorage.getItem('shutterpipe-path-history');
-    if (savedHistory) {
-        pathHistory = JSON.parse(savedHistory);
+    const historyData = await loadPathHistoryFromServer();
+    if (historyData) {
+        pathHistory = historyData;
     }
 
     // 북마크 로드
-    const savedBookmarks = localStorage.getItem('shutterpipe-bookmarks');
-    if (savedBookmarks) {
-        bookmarks = JSON.parse(savedBookmarks);
+    const bookmarksData = await loadBookmarksFromServer();
+    if (bookmarksData) {
+        bookmarks = bookmarksData;
     }
 
     // 북마크 버튼 상태 업데이트
@@ -73,7 +72,7 @@ function loadSettings() {
 }
 
 // 설정 저장
-function saveSettings() {
+async function saveSettings() {
     // Jobs 값 검증
     const jobsInput = document.getElementById('jobs');
     let jobsValue = parseInt(jobsInput.value) || 0;
@@ -106,7 +105,7 @@ function saveSettings() {
         log_file: document.getElementById('logFile').value,
         log_json: document.getElementById('logJson').checked
     };
-    localStorage.setItem('shutterpipe-config', JSON.stringify(config));
+    await saveSettingsToServer(config);
 }
 
 // 이벤트명 입력 필드 표시/숨김

@@ -2,7 +2,7 @@
 // 경로 자동완성 및 북마크 기능
 
 // 경로 히스토리에 추가
-function addToPathHistory(fieldId, path) {
+async function addToPathHistory(fieldId, path) {
     if (!path || path.trim() === '') return;
 
     path = path.trim();
@@ -18,8 +18,8 @@ function addToPathHistory(fieldId, path) {
         pathHistory[fieldId] = pathHistory[fieldId].slice(0, 10);
     }
 
-    // localStorage에 저장
-    localStorage.setItem('shutterpipe-path-history', JSON.stringify(pathHistory));
+    // 서버에 저장
+    await savePathHistoryToServer(pathHistory);
 }
 
 // 경로 입력 핸들러 (자동완성 + cleanPath)
@@ -86,7 +86,7 @@ function selectAutocompletePath(fieldId, path) {
 }
 
 // 북마크 토글
-function toggleBookmark(fieldId) {
+async function toggleBookmark(fieldId) {
     const input = document.getElementById(fieldId);
     const path = input.value.trim();
 
@@ -107,8 +107,8 @@ function toggleBookmark(fieldId) {
         alert('북마크에 추가되었습니다.');
     }
 
-    // localStorage에 저장
-    localStorage.setItem('shutterpipe-bookmarks', JSON.stringify(bookmarks));
+    // 서버에 저장
+    await saveBookmarksToServer(bookmarks);
 
     // 북마크 버튼 상태 업데이트
     updateBookmarkButtons();
@@ -194,9 +194,9 @@ function selectBookmarkPath(fieldId, path) {
 }
 
 // 북마크 제거
-function removeBookmark(fieldId, path) {
+async function removeBookmark(fieldId, path) {
     bookmarks[fieldId] = bookmarks[fieldId].filter(p => p !== path);
-    localStorage.setItem('shutterpipe-bookmarks', JSON.stringify(bookmarks));
+    await saveBookmarksToServer(bookmarks);
 
     renderBookmarkDropdown(fieldId);
     updateBookmarkButtons();
