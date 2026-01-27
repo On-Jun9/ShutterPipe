@@ -199,9 +199,7 @@ input[type="number"].input-modern::-webkit-outer-spin-button {
 
 /* ==================== Bookmark Dropdown ==================== */
 .bookmark-dropdown {
-  position: absolute;
-  top: calc(100% + 8px);
-  right: 0;
+  position: fixed;
   background: white;
   border: 2px solid var(--color-border);
   border-radius: 12px;
@@ -210,7 +208,7 @@ input[type="number"].input-modern::-webkit-outer-spin-button {
   max-width: 400px;
   max-height: 300px;
   overflow-y: auto;
-  z-index: 1000;
+  z-index: 10000;
   animation: slideInUp 0.2s ease;
 }
 
