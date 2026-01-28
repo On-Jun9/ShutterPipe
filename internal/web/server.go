@@ -8,14 +8,16 @@ import (
 )
 
 type Server struct {
-	router *mux.Router
-	hub    *Hub
+	router  *mux.Router
+	hub     *Hub
+	version string
 }
 
 func NewServer() *Server {
 	s := &Server{
-		router: mux.NewRouter(),
-		hub:    NewHub(),
+		router:  mux.NewRouter(),
+		hub:     NewHub(),
+		version: "unknown",
 	}
 
 	go s.hub.Run()
@@ -24,8 +26,13 @@ func NewServer() *Server {
 	return s
 }
 
+func (s *Server) SetVersion(v string) {
+	s.version = v
+}
+
 func (s *Server) setupRoutes() {
 	api := s.router.PathPrefix("/api").Subrouter()
+	api.HandleFunc("/version", s.handleVersion).Methods("GET")
 	api.HandleFunc("/browse", s.handleBrowse).Methods("GET")
 	api.HandleFunc("/config", s.handleGetConfig).Methods("GET")
 	api.HandleFunc("/config", s.handleSaveConfig).Methods("POST")
