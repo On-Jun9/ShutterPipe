@@ -3,7 +3,9 @@
 set -e
 
 echo "[BUILD] 빌드 중..."
-go build -o bin/shutterpipe-web ./cmd/shutterpipe-web
+VERSION=$(git describe --tags --always --dirty 2>/dev/null || echo "dev")
+go build -ldflags="-X main.version=${VERSION}" -o bin/shutterpipe-web ./cmd/shutterpipe-web
+echo "          버전: ${VERSION}"
 
 if [ -f "shutterpipe.pid" ]; then
     PID=$(cat shutterpipe.pid)
