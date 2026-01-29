@@ -22,8 +22,8 @@ async function startBackup() {
 
     // 히스토리에 추가
     if (typeof addToPathHistory === 'function') {
-        addToPathHistory('source', source);
-        addToPathHistory('dest', dest);
+        await addToPathHistory('source', source);
+        await addToPathHistory('dest', dest);
     }
 
     addLogEntry(`설정 확인: Source=${source}, Dest=${dest}`, 'info');
