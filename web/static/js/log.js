@@ -9,7 +9,17 @@ function addLogEntry(message, type = 'info') {
 
     const time = new Date().toLocaleTimeString('ko-KR', { hour12: false });
 
-    entry.innerHTML = `<span class="log-time">[${time}]</span><span class="log-${type}">${message}</span>`;
+    // Use textContent to prevent XSS instead of innerHTML
+    const timeSpan = document.createElement('span');
+    timeSpan.className = 'log-time';
+    timeSpan.textContent = `[${time}]`;
+
+    const messageSpan = document.createElement('span');
+    messageSpan.className = `log-${type}`;
+    messageSpan.textContent = message;
+
+    entry.appendChild(timeSpan);
+    entry.appendChild(messageSpan);
 
     logContent.appendChild(entry);
     logContent.scrollTop = logContent.scrollHeight;

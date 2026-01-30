@@ -199,7 +199,12 @@ function handleProgressUpdate(update) {
 
     } else if (update.type === 'complete') {
         isRunning = false;
-        document.getElementById('startBtn').disabled = false;
+        // Use enableBackupButton to respect validation state
+        if (typeof enableBackupButton === 'function') {
+            enableBackupButton();
+        } else {
+            document.getElementById('startBtn').disabled = false;
+        }
         progressBar.classList.remove('pulse');
         progressBar.style.width = '100%';
         progressPercent.textContent = '100%';
@@ -208,13 +213,23 @@ function handleProgressUpdate(update) {
         addLogEntry('백업 작업이 완료되었습니다.', 'success');
         showSummary(update.summary);
 
+        // Reload backup history after completion
+        if (typeof loadHistoryList === 'function') {
+            loadHistoryList();
+        }
+
         if (ws) {
             ws.close();
             ws = null;
         }
     } else if (update.type === 'error') {
         isRunning = false;
-        document.getElementById('startBtn').disabled = false;
+        // Use enableBackupButton to respect validation state
+        if (typeof enableBackupButton === 'function') {
+            enableBackupButton();
+        } else {
+            document.getElementById('startBtn').disabled = false;
+        }
         progressBar.classList.remove('pulse');
         alert('오류: ' + update.error);
         addLogEntry('오류 발생: ' + update.error, 'error');
@@ -250,56 +265,6 @@ function addFileToList(filename, action) {
 
     fileList.appendChild(entry);
     fileList.scrollTop = fileList.scrollHeight;
-}
-
-// 용량을 적절한 단위로 포맷
-function formatBytes(bytes) {
-    if (bytes === 0) return '0 B';
-    const gb = bytes / (1024 * 1024 * 1024);
-    const mb = bytes / (1024 * 1024);
-
-    if (gb >= 1) {
-        return gb.toFixed(2) + ' GB';
-    } else if (mb >= 1) {
-        return mb.toFixed(2) + ' MB';
-    } else {
-        return (bytes / 1024).toFixed(2) + ' KB';
-    }
-}
-
-// 속도를 적절한 단위로 포맷
-function formatSpeed(bytesPerSecond) {
-    if (bytesPerSecond === 0) return '0 B/s';
-
-    const gbps = bytesPerSecond / (1024 * 1024 * 1024);
-    const mbps = bytesPerSecond / (1024 * 1024);
-    const kbps = bytesPerSecond / 1024;
-
-    if (gbps >= 1) {
-        return gbps.toFixed(2) + ' GB/s';
-    } else if (mbps >= 1) {
-        return mbps.toFixed(2) + ' MB/s';
-    } else if (kbps >= 1) {
-        return kbps.toFixed(2) + ' KB/s';
-    } else {
-        return bytesPerSecond.toFixed(2) + ' B/s';
-    }
-}
-
-// 시간을 적절한 단위로 포맷
-function formatDuration(seconds) {
-    if (seconds === 0) return '0초';
-
-    const hours = Math.floor(seconds / 3600);
-    const minutes = Math.floor((seconds % 3600) / 60);
-    const secs = seconds % 60;
-
-    const parts = [];
-    if (hours > 0) parts.push(`${hours}시간`);
-    if (minutes > 0) parts.push(`${minutes}분`);
-    if (secs > 0 || parts.length === 0) parts.push(`${secs}초`);
-
-    return parts.join(' ');
 }
 
 // 요약 표시

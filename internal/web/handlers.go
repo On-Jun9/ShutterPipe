@@ -6,12 +6,20 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/On-Jun9/ShutterPipe/internal/config"
 	"github.com/On-Jun9/ShutterPipe/internal/pipeline"
 	"github.com/On-Jun9/ShutterPipe/pkg/types"
 )
+
+// ValidationError represents a field validation error.
+type ValidationError struct {
+	Field   string `json:"field"`
+	Message string `json:"message"`
+}
 
 type BrowseRequest struct {
 	Path string `json:"path"`
@@ -296,7 +304,26 @@ func (s *Server) handleSaveSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := m.SaveSettings(&settings); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		errMsg := err.Error()
+
+		// Check if this is a validation error or internal error
+		if strings.Contains(errMsg, "invalid") {
+			// Validation error - return 400
+			valErr := ValidationError{Message: errMsg}
+
+			if strings.Contains(errMsg, "source") {
+				valErr.Field = "source"
+			} else if strings.Contains(errMsg, "destination") || strings.Contains(errMsg, "dest") {
+				valErr.Field = "dest"
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(valErr)
+		} else {
+			// Internal error (IO, permissions, etc) - return 500
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
 		return
 	}
 
@@ -335,6 +362,16 @@ func (s *Server) handleSaveBookmarks(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := m.SaveBookmarks(&bookmarks); err != nil {
+		// Check if it's a validation error
+		if strings.Contains(err.Error(), "invalid") || strings.Contains(err.Error(), "malicious") {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(ValidationError{
+				Field:   "bookmarks",
+				Message: err.Error(),
+			})
+			return
+		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -374,12 +411,57 @@ func (s *Server) handleSavePathHistory(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := m.SavePathHistory(&history); err != nil {
+		// Check if it's a validation error
+		if strings.Contains(err.Error(), "invalid") || strings.Contains(err.Error(), "malicious") {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(ValidationError{
+				Field:   "path_history",
+				Message: err.Error(),
+			})
+			return
+		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+func (s *Server) handleGetBackupHistory(w http.ResponseWriter, r *http.Request) {
+	// Get limit from query parameter (default 20, max 100)
+	limit := 20
+	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
+		if parsedLimit, err := strconv.Atoi(limitStr); err == nil {
+			limit = parsedLimit
+			if limit > 100 {
+				limit = 100
+			} else if limit < 1 {
+				limit = 20
+			}
+		}
+	}
+
+	m, err := config.NewUserDataManager()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	history, err := m.LoadBackupHistory()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Return only the requested number of entries (already sorted newest first)
+	if len(history.Entries) > limit {
+		history.Entries = history.Entries[:limit]
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(history)
 }
 
 // Version handler

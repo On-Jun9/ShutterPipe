@@ -1,6 +1,80 @@
 // Settings Module
 // 설정 저장 및 로드
 
+// ==================== Path Validation ====================
+
+function validatePath(path) {
+    if (!path) return null; // Empty is allowed
+
+    const lowerPath = path.toLowerCase();
+
+    // Check for HTML tags (not just < or >, but actual tag patterns)
+    const htmlTagPatterns = [
+        { pattern: '<script', msg: '스크립트 태그를 사용할 수 없습니다' },
+        { pattern: '</script', msg: '스크립트 태그를 사용할 수 없습니다' },
+        { pattern: '<iframe', msg: 'iframe 태그를 사용할 수 없습니다' },
+        { pattern: '<object', msg: 'object 태그를 사용할 수 없습니다' },
+        { pattern: '<embed', msg: 'embed 태그를 사용할 수 없습니다' },
+        { pattern: '<img', msg: 'img 태그를 사용할 수 없습니다' }
+    ];
+
+    for (const { pattern, msg } of htmlTagPatterns) {
+        if (lowerPath.includes(pattern)) {
+            return msg;
+        }
+    }
+
+    // Check for event handlers and javascript
+    const dangerousPatterns = [
+        { pattern: 'javascript:', msg: 'JavaScript URL을 사용할 수 없습니다' },
+        { pattern: 'onerror=', msg: '이벤트 핸들러를 사용할 수 없습니다' },
+        { pattern: 'onload=', msg: '이벤트 핸들러를 사용할 수 없습니다' },
+        { pattern: 'onclick=', msg: '이벤트 핸들러를 사용할 수 없습니다' },
+        { pattern: 'onmouseover=', msg: '이벤트 핸들러를 사용할 수 없습니다' }
+    ];
+
+    for (const { pattern, msg } of dangerousPatterns) {
+        if (lowerPath.includes(pattern)) {
+            return msg;
+        }
+    }
+
+    // Check maximum length
+    if (path.length > 4096) {
+        return '경로가 너무 깁니다 (최대 4096자)';
+    }
+
+    return null; // Valid
+}
+
+// Validate and show error for a field
+function validateField(fieldId) {
+    const input = document.getElementById(fieldId);
+    if (!input) return true;
+
+    const error = validatePath(input.value);
+    const group = input.closest('.path-input-group');
+
+    if (error) {
+        if (group) group.classList.add('has-error');
+        input.title = error;
+        disableBackupButton();
+        return false;
+    } else {
+        if (group) group.classList.remove('has-error');
+        input.title = '';
+        // Check if both fields are valid before enabling
+        const sourceValid = !validatePath(document.getElementById('source').value);
+        const destValid = !validatePath(document.getElementById('dest').value);
+        if (sourceValid && destValid) {
+            enableBackupButton();
+        }
+        return true;
+    }
+}
+
+// ==================== Settings Load/Save ====================
+
 // 설정 로드
 async function loadSettings() {
     // 서버에서 설정 로드
@@ -73,6 +147,9 @@ async function loadSettings() {
 
 // 설정 저장
 async function saveSettings() {
+    // Clear previous errors
+    clearPathErrors();
+
     // Jobs 값 검증
     const jobsInput = document.getElementById('jobs');
     let jobsValue = parseInt(jobsInput.value) || 0;
@@ -105,7 +182,75 @@ async function saveSettings() {
         log_file: document.getElementById('logFile').value,
         log_json: document.getElementById('logJson').checked
     };
-    await saveSettingsToServer(config);
+
+    const result = await saveSettingsToServer(config);
+    if (!result.success) {
+        // Mark error fields and disable backup button
+        markPathErrors(result.field, result.error);
+        disableBackupButton();
+    } else {
+        enableBackupButton();
+    }
+}
+
+// Clear path input errors
+function clearPathErrors() {
+    const sourceGroup = document.getElementById('source').closest('.path-input-group');
+    const destGroup = document.getElementById('dest').closest('.path-input-group');
+    if (sourceGroup) sourceGroup.classList.remove('has-error');
+    if (destGroup) destGroup.classList.remove('has-error');
+}
+
+// Mark path inputs with errors based on field identifier
+function markPathErrors(field, errorMessage) {
+    const sourceGroup = document.getElementById('source').closest('.path-input-group');
+    const destGroup = document.getElementById('dest').closest('.path-input-group');
+
+    // Use structured field identifier from backend
+    if (field === 'source') {
+        if (sourceGroup) sourceGroup.classList.add('has-error');
+        document.getElementById('source').title = errorMessage || '';
+    } else if (field === 'dest') {
+        if (destGroup) destGroup.classList.add('has-error');
+        document.getElementById('dest').title = errorMessage || '';
+    } else {
+        // Fallback: try parsing error message
+        if (errorMessage) {
+            const lowerError = errorMessage.toLowerCase();
+            if (lowerError.includes('source')) {
+                if (sourceGroup) sourceGroup.classList.add('has-error');
+            } else if (lowerError.includes('destination') || lowerError.includes('dest')) {
+                if (destGroup) destGroup.classList.add('has-error');
+            }
+        }
+    }
+}
+
+// Disable backup button
+function disableBackupButton() {
+    const startBtn = document.getElementById('startBtn');
+    if (startBtn) {
+        startBtn.disabled = true;
+        startBtn.title = '설정에 오류가 있습니다';
+    }
+}
+
+// Enable backup button (only if paths are valid)
+function enableBackupButton() {
+    const startBtn = document.getElementById('startBtn');
+    if (startBtn && !isRunning) {
+        // Check if both source and dest are valid before enabling
+        const sourceValid = !validatePath(document.getElementById('source').value);
+        const destValid = !validatePath(document.getElementById('dest').value);
+
+        if (sourceValid && destValid) {
+            startBtn.disabled = false;
+            startBtn.title = '';
+        } else {
+            startBtn.disabled = true;
+            startBtn.title = '설정에 오류가 있습니다';
+        }
+    }
 }
 
 // 이벤트명 입력 필드 표시/숨김
@@ -189,3 +334,19 @@ function updateDateFilterButtons() {
 
 // 페이지 로드 시 설정 로드
 window.addEventListener('DOMContentLoaded', loadSettings);
+
+// Real-time path validation
+window.addEventListener('DOMContentLoaded', () => {
+    const sourceInput = document.getElementById('source');
+    const destInput = document.getElementById('dest');
+
+    if (sourceInput) {
+        sourceInput.addEventListener('input', () => validateField('source'));
+        sourceInput.addEventListener('blur', () => validateField('source'));
+    }
+
+    if (destInput) {
+        destInput.addEventListener('input', () => validateField('dest'));
+        destInput.addEventListener('blur', () => validateField('dest'));
+    }
+});

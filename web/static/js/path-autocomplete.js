@@ -7,6 +7,9 @@ async function addToPathHistory(fieldId, path) {
 
     path = path.trim();
 
+    // 기존 상태 백업
+    const previousHistory = JSON.parse(JSON.stringify(pathHistory));
+
     // 중복 제거
     pathHistory[fieldId] = pathHistory[fieldId].filter(p => p !== path);
 
@@ -19,7 +22,11 @@ async function addToPathHistory(fieldId, path) {
     }
 
     // 서버에 저장
-    await savePathHistoryToServer(pathHistory);
+    const result = await savePathHistoryToServer(pathHistory);
+    if (!result.success) {
+        // 저장 실패 시 롤백
+        pathHistory = previousHistory;
+    }
 }
 
 // 경로 입력 핸들러 (자동완성 + cleanPath)
@@ -95,20 +102,34 @@ async function toggleBookmark(fieldId) {
         return;
     }
 
+    // 기존 상태 백업
+    const previousBookmarks = JSON.parse(JSON.stringify(bookmarks));
+
     const index = bookmarks[fieldId].indexOf(path);
 
     if (index > -1) {
         // 북마크 제거
         bookmarks[fieldId].splice(index, 1);
-        alert('북마크에서 제거되었습니다.');
     } else {
         // 북마크 추가
         bookmarks[fieldId].push(path);
-        alert('북마크에 추가되었습니다.');
     }
 
     // 서버에 저장
-    await saveBookmarksToServer(bookmarks);
+    const result = await saveBookmarksToServer(bookmarks);
+
+    if (result.success) {
+        // 성공 시 알림
+        if (index > -1) {
+            alert('북마크에서 제거되었습니다.');
+        } else {
+            alert('북마크에 추가되었습니다.');
+        }
+    } else {
+        // 실패 시 롤백
+        bookmarks = previousBookmarks;
+        alert('북마크 저장에 실패했습니다.');
+    }
 
     // 북마크 버튼 상태 업데이트
     updateBookmarkButtons();
@@ -203,8 +224,17 @@ function selectBookmarkPath(fieldId, path) {
 
 // 북마크 제거
 async function removeBookmark(fieldId, path) {
+    // 기존 상태 백업
+    const previousBookmarks = JSON.parse(JSON.stringify(bookmarks));
+
     bookmarks[fieldId] = bookmarks[fieldId].filter(p => p !== path);
-    await saveBookmarksToServer(bookmarks);
+    const result = await saveBookmarksToServer(bookmarks);
+
+    if (!result.success) {
+        // 저장 실패 시 롤백
+        bookmarks = previousBookmarks;
+        alert('북마크 삭제에 실패했습니다.');
+    }
 
     renderBookmarkDropdown(fieldId);
     updateBookmarkButtons();
