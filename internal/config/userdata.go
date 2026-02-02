@@ -120,16 +120,19 @@ func (m *UserDataManager) LoadSettings() (*types.UserSettings, error) {
 		if os.IsNotExist(err) {
 			// Return default settings
 			return &types.UserSettings{
-				OrganizeStrategy:  types.OrganizeByDate,
-				ConflictPolicy:    types.ConflictPolicyRename,
-				DedupMethod:       types.DedupMethodNameSize,
-				Jobs:              4,
-				IncludeExtensions: []string{},
-				UnclassifiedDir:   "unclassified",
-				QuarantineDir:     "quarantine",
-				StateFile:         "shutterpipe.state",
-				LogFile:           "shutterpipe.log",
-				UpdatedAt:         time.Now(),
+				OrganizeStrategy: types.OrganizeByDate,
+				ConflictPolicy:   types.ConflictPolicySkip,
+				DedupMethod:      types.DedupMethodNameSize,
+				Jobs:             0,
+				IncludeExtensions: []string{
+					"jpg", "jpeg", "heic", "heif", "png", "raw", "arw", "cr2", "nef", "dng",
+					"mp4", "mov", "avi", "mkv", "mxf", "xml",
+				},
+				UnclassifiedDir: "unclassified",
+				QuarantineDir:   "quarantine",
+				StateFile:       filepath.Join(m.dataDir, "state.json"),
+				LogFile:         filepath.Join(m.dataDir, "shutterpipe.log"),
+				UpdatedAt:       time.Now(),
 			}, nil
 		}
 		return nil, fmt.Errorf("failed to read settings file: %w", err)
