@@ -6,6 +6,9 @@ let ws = null;
 
 // 백업 실행 상태
 let isRunning = false;
+let runStartPending = false;  // 백업 시작 중 (WS 연결 ~ API 요청 사이)
+let runRequestSent = false;  // /api/run 요청이 전송되어 서버 실행 여부가 불확실한 상태
+let hasShownCloseAlert = false;  // ws.onclose 중복 알림 방지
 
 // 확장자 목록
 let includeExtensions = [

@@ -185,9 +185,17 @@ async function saveSettings() {
 
     const result = await saveSettingsToServer(config);
     if (!result.success) {
-        // Mark error fields and disable backup button
-        markPathErrors(result.field, result.error);
-        disableBackupButton();
+        // 경로 검증 오류와 서버 오류 구분
+        if (result.field) {
+            // 경로 검증 오류: 필드 표시하고 버튼 비활성화
+            markPathErrors(result.field, result.error);
+            disableBackupButton();
+        } else {
+            // 서버/네트워크 오류: 경고만 표시하고 현재 검증 상태 유지
+            console.warn('설정 저장 실패 (서버 오류):', result.error);
+            // enableBackupButton()을 호출하여 현재 경로 검증 상태 반영
+            enableBackupButton();
+        }
     } else {
         enableBackupButton();
     }
