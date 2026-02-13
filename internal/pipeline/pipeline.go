@@ -122,13 +122,16 @@ func (p *Pipeline) Run() (*types.RunSummary, error) {
 	entries, err := p.scanner.Scan(p.cfg.Source)
 	if err != nil {
 		// Save failure history for scan errors
+		endTime := time.Now()
 		summary := &types.RunSummary{
 			StartTime: startTime,
-			Duration:  time.Since(startTime),
+			EndTime:   endTime,
+			Duration:  endTime.Sub(startTime),
+			Failed:    1,
 		}
 
 		historyEntry := types.BackupHistoryEntry{
-			ID:        strconv.FormatInt(startTime.Unix(), 10),
+			ID:        historyEntryID(startTime),
 			Summary:   *summary,
 			Config:    p.configToBackupConfig(),
 			Status:    types.BackupStatusFailed,
@@ -237,7 +240,7 @@ func (p *Pipeline) Run() (*types.RunSummary, error) {
 		}
 
 		historyEntry := types.BackupHistoryEntry{
-			ID:        strconv.FormatInt(summary.StartTime.Unix(), 10),
+			ID:        historyEntryID(summary.StartTime),
 			Summary:   *summary,
 			Config:    p.configToBackupConfig(),
 			Status:    status,
@@ -331,7 +334,7 @@ func (p *Pipeline) Run() (*types.RunSummary, error) {
 	}
 
 	historyEntry := types.BackupHistoryEntry{
-		ID:        strconv.FormatInt(summary.StartTime.Unix(), 10),
+		ID:        historyEntryID(summary.StartTime),
 		Summary:   *summary,
 		Config:    p.configToBackupConfig(),
 		Status:    status,
@@ -358,6 +361,10 @@ func (p *Pipeline) Run() (*types.RunSummary, error) {
 
 func (p *Pipeline) Close() error {
 	return p.logger.Close()
+}
+
+func historyEntryID(t time.Time) string {
+	return strconv.FormatInt(t.UnixNano(), 10)
 }
 
 // configToBackupConfig converts Config to BackupConfig for history entry.
