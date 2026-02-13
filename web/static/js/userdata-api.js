@@ -1,5 +1,51 @@
 // UserData API - Settings, Bookmarks, PathHistory management
 
+async function parseApiErrorResponse(response) {
+    const contentType = response.headers.get('content-type') || '';
+
+    if (contentType.includes('application/json')) {
+        try {
+            const errorData = await response.json();
+            const message = errorData?.message || errorData?.error || `서버 오류 (${response.status})`;
+            return { field: errorData?.field, error: message };
+        } catch (parseError) {
+            return { error: `서버 오류 (${response.status})` };
+        }
+    }
+
+    const errorText = await response.text();
+    return { error: errorText || `서버 오류 (${response.status})` };
+}
+
+// =============================================================================
+// Run API
+// =============================================================================
+
+async function startBackupRunOnServer(config) {
+    try {
+        const response = await fetch('/api/run', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(config)
+        });
+
+        if (!response.ok) {
+            const parsedError = await parseApiErrorResponse(response);
+            return {
+                success: false,
+                status: response.status,
+                field: parsedError.field,
+                error: parsedError.error
+            };
+        }
+
+        return { success: true, status: response.status };
+    } catch (error) {
+        console.error('백업 시작 요청 실패:', error);
+        return { success: false, error: error.message };
+    }
+}
+
 // =============================================================================
 // Settings API
 // =============================================================================
@@ -28,23 +74,11 @@ async function saveSettingsToServer(settings) {
             body: JSON.stringify(settings)
         });
         if (!response.ok) {
-            // Try to parse structured error response
-            const contentType = response.headers.get('content-type');
-            if (contentType && contentType.includes('application/json')) {
-                const errorData = await response.json();
-                if (typeof showNotification === 'function') {
-                    showNotification(`설정 저장 실패: ${errorData.message}`, 'error');
-                }
-                return { success: false, field: errorData.field, error: errorData.message };
-            } else {
-                // Fallback to text error
-                const errorText = await response.text();
-                const errorMsg = errorText || `서버 오류 (${response.status})`;
-                if (typeof showNotification === 'function') {
-                    showNotification(`설정 저장 실패: ${errorMsg}`, 'error');
-                }
-                return { success: false, error: errorMsg };
+            const parsedError = await parseApiErrorResponse(response);
+            if (typeof showNotification === 'function') {
+                showNotification(`설정 저장 실패: ${parsedError.error}`, 'error');
             }
+            return { success: false, field: parsedError.field, error: parsedError.error };
         }
         return { success: true };
     } catch (error) {
@@ -84,8 +118,11 @@ async function saveBookmarksToServer(bookmarks) {
             body: JSON.stringify(bookmarks)
         });
         if (!response.ok) {
-            const errorText = await response.text();
-            throw new Error(errorText || `서버 오류 (${response.status})`);
+            const parsedError = await parseApiErrorResponse(response);
+            if (typeof showNotification === 'function') {
+                showNotification(`북마크 저장 실패: ${parsedError.error}`, 'error');
+            }
+            return { success: false, field: parsedError.field, error: parsedError.error };
         }
         return { success: true };
     } catch (error) {
@@ -125,8 +162,11 @@ async function savePathHistoryToServer(history) {
             body: JSON.stringify(history)
         });
         if (!response.ok) {
-            const errorText = await response.text();
-            throw new Error(errorText || `서버 오류 (${response.status})`);
+            const parsedError = await parseApiErrorResponse(response);
+            if (typeof showNotification === 'function') {
+                showNotification(`경로 히스토리 저장 실패: ${parsedError.error}`, 'error');
+            }
+            return { success: false, field: parsedError.field, error: parsedError.error };
         }
         return { success: true };
     } catch (error) {

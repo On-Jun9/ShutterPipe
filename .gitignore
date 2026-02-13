@@ -21,3 +21,6 @@ Thumbs.db
 # Test files
 *.tmp
 
+# Runtime state (contains user file paths)
+shutterpipe.state
+*.state

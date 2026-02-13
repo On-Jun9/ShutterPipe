@@ -2,12 +2,12 @@ package web
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"sync"
 
 	"github.com/On-Jun9/ShutterPipe/internal/config"
@@ -19,6 +19,25 @@ import (
 type ValidationError struct {
 	Field   string `json:"field"`
 	Message string `json:"message"`
+}
+
+type APIErrorResponse struct {
+	Message string `json:"message"`
+}
+
+func writeAPIError(w http.ResponseWriter, status int, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(APIErrorResponse{Message: message})
+}
+
+func writeValidationError(w http.ResponseWriter, field, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusBadRequest)
+	json.NewEncoder(w).Encode(ValidationError{
+		Field:   field,
+		Message: message,
+	})
 }
 
 type BrowseRequest struct {
@@ -46,7 +65,15 @@ func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 
 	entries, err := os.ReadDir(path)
 	if err != nil {
-		json.NewEncoder(w).Encode(BrowseResponse{Error: err.Error()})
+		if errors.Is(err, os.ErrNotExist) {
+			writeAPIError(w, http.StatusNotFound, err.Error())
+			return
+		}
+		if errors.Is(err, os.ErrPermission) {
+			writeAPIError(w, http.StatusForbidden, err.Error())
+			return
+		}
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
@@ -78,7 +105,7 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 	var cfg config.Config
 	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeAPIError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -100,14 +127,14 @@ var runMutex sync.Mutex
 
 func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 	if !runMutex.TryLock() {
-		http.Error(w, "backup already running", http.StatusConflict)
+		writeAPIError(w, http.StatusConflict, "backup already running")
 		return
 	}
 
 	var cfg config.Config
 	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
 		runMutex.Unlock()
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeAPIError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -116,7 +143,13 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 
 	if err := cfg.Validate(); err != nil {
 		runMutex.Unlock()
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		var validationErr *config.ValidationError
+		if errors.As(err, &validationErr) {
+			writeValidationError(w, validationErr.Field, validationErr.Message)
+			return
+		}
+
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
@@ -178,13 +211,13 @@ func (s *Server) broadcastProgress(update pipeline.ProgressUpdate) {
 func (s *Server) handleListPresets(w http.ResponseWriter, r *http.Request) {
 	pm, err := config.NewPresetManager()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
 	presets, err := pm.ListPresets()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
@@ -200,24 +233,24 @@ func (s *Server) handleSavePreset(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeAPIError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
 	if req.Name == "" {
-		http.Error(w, "preset name is required", http.StatusBadRequest)
+		writeAPIError(w, http.StatusBadRequest, "preset name is required")
 		return
 	}
 
 	pm, err := config.NewPresetManager()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
 	preset := config.ConfigToPreset(&req.Config, req.Name, req.Description)
 	if err := pm.SavePreset(preset); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
@@ -228,19 +261,19 @@ func (s *Server) handleSavePreset(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleLoadPreset(w http.ResponseWriter, r *http.Request) {
 	name := r.URL.Query().Get("name")
 	if name == "" {
-		http.Error(w, "preset name is required", http.StatusBadRequest)
+		writeAPIError(w, http.StatusBadRequest, "preset name is required")
 		return
 	}
 
 	pm, err := config.NewPresetManager()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
 	preset, err := pm.LoadPreset(name)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		writeAPIError(w, http.StatusNotFound, err.Error())
 		return
 	}
 
@@ -252,18 +285,18 @@ func (s *Server) handleLoadPreset(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleDeletePreset(w http.ResponseWriter, r *http.Request) {
 	name := r.URL.Query().Get("name")
 	if name == "" {
-		http.Error(w, "preset name is required", http.StatusBadRequest)
+		writeAPIError(w, http.StatusBadRequest, "preset name is required")
 		return
 	}
 
 	pm, err := config.NewPresetManager()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
 	if err := pm.DeletePreset(name); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
@@ -276,13 +309,13 @@ func (s *Server) handleDeletePreset(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 	m, err := config.NewUserDataManager()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
 	settings, err := m.LoadSettings()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
@@ -293,37 +326,24 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSaveSettings(w http.ResponseWriter, r *http.Request) {
 	var settings types.UserSettings
 	if err := json.NewDecoder(r.Body).Decode(&settings); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeAPIError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
 	m, err := config.NewUserDataManager()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
 	if err := m.SaveSettings(&settings); err != nil {
-		errMsg := err.Error()
-
-		// Check if this is a validation error or internal error
-		if strings.Contains(errMsg, "invalid") {
-			// Validation error - return 400
-			valErr := ValidationError{Message: errMsg}
-
-			if strings.Contains(errMsg, "source") {
-				valErr.Field = "source"
-			} else if strings.Contains(errMsg, "destination") || strings.Contains(errMsg, "dest") {
-				valErr.Field = "dest"
-			}
-
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(valErr)
-		} else {
-			// Internal error (IO, permissions, etc) - return 500
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+		var validationErr *config.ValidationError
+		if errors.As(err, &validationErr) {
+			writeValidationError(w, validationErr.Field, validationErr.Message)
+			return
 		}
+
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
@@ -334,13 +354,13 @@ func (s *Server) handleSaveSettings(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleGetBookmarks(w http.ResponseWriter, r *http.Request) {
 	m, err := config.NewUserDataManager()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
 	bookmarks, err := m.LoadBookmarks()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
@@ -351,28 +371,24 @@ func (s *Server) handleGetBookmarks(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSaveBookmarks(w http.ResponseWriter, r *http.Request) {
 	var bookmarks types.Bookmarks
 	if err := json.NewDecoder(r.Body).Decode(&bookmarks); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeAPIError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
 	m, err := config.NewUserDataManager()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
 	if err := m.SaveBookmarks(&bookmarks); err != nil {
-		// Check if it's a validation error
-		if strings.Contains(err.Error(), "invalid") || strings.Contains(err.Error(), "malicious") {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(ValidationError{
-				Field:   "bookmarks",
-				Message: err.Error(),
-			})
+		var validationErr *config.ValidationError
+		if errors.As(err, &validationErr) {
+			writeValidationError(w, validationErr.Field, validationErr.Message)
 			return
 		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
@@ -383,13 +399,13 @@ func (s *Server) handleSaveBookmarks(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleGetPathHistory(w http.ResponseWriter, r *http.Request) {
 	m, err := config.NewUserDataManager()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
 	history, err := m.LoadPathHistory()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
@@ -400,28 +416,24 @@ func (s *Server) handleGetPathHistory(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSavePathHistory(w http.ResponseWriter, r *http.Request) {
 	var history types.PathHistory
 	if err := json.NewDecoder(r.Body).Decode(&history); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeAPIError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
 	m, err := config.NewUserDataManager()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
 	if err := m.SavePathHistory(&history); err != nil {
-		// Check if it's a validation error
-		if strings.Contains(err.Error(), "invalid") || strings.Contains(err.Error(), "malicious") {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(ValidationError{
-				Field:   "path_history",
-				Message: err.Error(),
-			})
+		var validationErr *config.ValidationError
+		if errors.As(err, &validationErr) {
+			writeValidationError(w, validationErr.Field, validationErr.Message)
 			return
 		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
@@ -445,13 +457,13 @@ func (s *Server) handleGetBackupHistory(w http.ResponseWriter, r *http.Request) 
 
 	m, err := config.NewUserDataManager()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
 	history, err := m.LoadBackupHistory()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 

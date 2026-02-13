@@ -94,18 +94,14 @@ async function startBackup() {
 
         // Step 2: Send Run Request
         runRequestSent = true;
-        const response = await fetch('/api/run', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(config)
-        });
+        const runResult = await startBackupRunOnServer(config);
 
-        addLogEntry(`서버 응답 수신: Status ${response.status}`, response.ok ? 'success' : 'error');
+        const statusText = runResult.status || 'NETWORK_ERROR';
+        addLogEntry(`서버 응답 수신: Status ${statusText}`, runResult.success ? 'success' : 'error');
 
-        // !response.ok를 throw로 변경하여 catch에 몰아주기
-        if (!response.ok) {
-            const error = await response.text();
-            throw new Error('백업 시작 실패: ' + error);
+        if (!runResult.success) {
+            const message = runResult.error || '알 수 없는 오류';
+            throw new Error('백업 시작 실패: ' + message);
         }
 
         // API 요청 성공 → 시작 완료, 실행 중

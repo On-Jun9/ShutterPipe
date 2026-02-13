@@ -128,7 +128,8 @@ async function toggleBookmark(fieldId) {
     } else {
         // 실패 시 롤백
         bookmarks = previousBookmarks;
-        alert('북마크 저장에 실패했습니다.');
+        const details = result.error ? `\n${result.error}` : '';
+        alert(`북마크 저장에 실패했습니다.${details}`);
     }
 
     // 북마크 버튼 상태 업데이트
@@ -233,7 +234,8 @@ async function removeBookmark(fieldId, path) {
     if (!result.success) {
         // 저장 실패 시 롤백
         bookmarks = previousBookmarks;
-        alert('북마크 삭제에 실패했습니다.');
+        const details = result.error ? `\n${result.error}` : '';
+        alert(`북마크 삭제에 실패했습니다.${details}`);
     }
 
     renderBookmarkDropdown(fieldId);

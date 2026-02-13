@@ -84,10 +84,16 @@ func NewUserDataManager() (*UserDataManager, error) {
 func (m *UserDataManager) SaveSettings(settings *types.UserSettings) error {
 	// Validate paths for XSS prevention
 	if err := validatePath(settings.Source); err != nil {
-		return fmt.Errorf("invalid source path: %w", err)
+		return &ValidationError{
+			Field:   "source",
+			Message: fmt.Sprintf("invalid source path: %v", err),
+		}
 	}
 	if err := validatePath(settings.Dest); err != nil {
-		return fmt.Errorf("invalid destination path: %w", err)
+		return &ValidationError{
+			Field:   "dest",
+			Message: fmt.Sprintf("invalid destination path: %v", err),
+		}
 	}
 
 	settings.UpdatedAt = time.Now()
@@ -151,12 +157,18 @@ func (m *UserDataManager) SaveBookmarks(bookmarks *types.Bookmarks) error {
 	// Validate all bookmark paths
 	for _, path := range bookmarks.Source {
 		if err := validatePath(path); err != nil {
-			return fmt.Errorf("invalid source bookmark: %w", err)
+			return &ValidationError{
+				Field:   "bookmarks",
+				Message: fmt.Sprintf("invalid source bookmark: %v", err),
+			}
 		}
 	}
 	for _, path := range bookmarks.Dest {
 		if err := validatePath(path); err != nil {
-			return fmt.Errorf("invalid dest bookmark: %w", err)
+			return &ValidationError{
+				Field:   "bookmarks",
+				Message: fmt.Sprintf("invalid dest bookmark: %v", err),
+			}
 		}
 	}
 
@@ -211,12 +223,18 @@ func (m *UserDataManager) SavePathHistory(history *types.PathHistory) error {
 	// Validate all history paths
 	for _, path := range history.Source {
 		if err := validatePath(path); err != nil {
-			return fmt.Errorf("invalid source path in history: %w", err)
+			return &ValidationError{
+				Field:   "path_history",
+				Message: fmt.Sprintf("invalid source path in history: %v", err),
+			}
 		}
 	}
 	for _, path := range history.Dest {
 		if err := validatePath(path); err != nil {
-			return fmt.Errorf("invalid dest path in history: %w", err)
+			return &ValidationError{
+				Field:   "path_history",
+				Message: fmt.Sprintf("invalid dest path in history: %v", err),
+			}
 		}
 	}
 

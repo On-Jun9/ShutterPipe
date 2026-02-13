@@ -1,14 +1,15 @@
-# ShutterPipe v0.2.0
+# ShutterPipe
 
 사진/영상 파일을 촬영일시 기준으로 자동 백업 및 분류하는 도구
 
 ## 주요 기능
 
-- **메타데이터 기반 분류**: EXIF/XMP 데이터를 읽어 촬영 날짜별로 자동 분류
+- **메타데이터 기반 분류**: EXIF/XML 데이터를 읽어 촬영 날짜별로 자동 분류
 - **날짜 필터링**: 특정 기간의 파일만 선택적으로 백업 (오늘/최근 7일/최근 30일/전체)
 - **웹 UI**: 브라우저에서 설정 및 실시간 진행 상황 확인
 - **프리셋 관리**: 자주 사용하는 설정을 저장하고 불러오기
 - **설정 영속성**: 서버 측 JSON 저장으로 다중 브라우저 간 설정 공유
+- **백업 이력 관리**: 최근 백업 결과를 사이드바에서 조회 및 필터링
 - **중복 검사**: 파일명+크기 또는 해시 기반 중복 파일 감지
 - **충돌 처리**: Skip/Rename/Overwrite/Quarantine 정책 선택
 - **경로 북마크**: 자주 사용하는 경로를 저장하여 빠른 접근
@@ -17,7 +18,7 @@
 
 ### 필요 환경
 
-- Go 1.21 이상
+- Go 1.23.1 이상
 
 ### 설치
 
@@ -71,7 +72,7 @@ cd ShutterPipe
 ```
 목적지/
 ├── 2025/
-│   ├── 0101-크리스마스/
+│   ├── 250101-크리스마스/
 │   │   ├── JPG/
 │   │   │   └── IMG_1234.jpg
 │   │   ├── MP4/
@@ -80,7 +81,7 @@ cd ShutterPipe
 │   │       └── IMG_9999.cr2
 ```
 
-- 이벤트명이 비어 있으면 `0101`처럼 날짜만 사용합니다.
+- 이벤트명이 비어 있으면 `250101`처럼 날짜만 사용합니다.
 - 파일 타입 폴더는 `JPG`, `MP4`, `RAW`로 분류됩니다.
 
 ### 5. 백업 시작
@@ -100,8 +101,6 @@ go build -o bin/shutterpipe ./cmd/shutterpipe
 - `-d, --dest`: 목적지 경로
 - `-e, --include-ext`: 포함할 확장자 목록 (예: `-e jpg -e mp4`)
 - `-j, --jobs`: 병렬 워커 수 (0=자동)
-- `--date-filter-start`: 날짜 필터 시작일 (YYYY-MM-DD)
-- `--date-filter-end`: 날짜 필터 종료일 (YYYY-MM-DD)
 - `--dedup`: `name-size` 또는 `hash`
 - `--conflict`: `skip`, `rename`, `overwrite`, `quarantine`
 - `--unclassified-dir`: 분류 불가 폴더명
@@ -110,7 +109,10 @@ go build -o bin/shutterpipe ./cmd/shutterpipe
 - `--log-file`: 로그 파일 경로
 - `--log-json`: JSON 로그 출력
 - `--dry-run`: 복사 없이 시뮬레이션
-- `--hash-verify`: 해시 검증
+- `--hash-verify`: 해시 검증 옵션
+
+날짜 필터(`date_filter_start`, `date_filter_end`)는 현재 설정 파일(`--config`)에서 지정할 수 있습니다.
+`hash_verify`는 현재 설정/실행 파라미터로 전달되며, 실제 복사 검증 로직 연결은 추후 업데이트 예정입니다.
 
 ### 버전 확인
 
@@ -130,7 +132,7 @@ go build -o bin/shutterpipe ./cmd/shutterpipe
 | 충돌 정책 | Skip/Rename/Overwrite/Quarantine | Skip |
 | 중복 검사 방법 | 이름+크기 또는 해시 | 이름+크기 |
 | Dry Run | 실제 복사 없이 시뮬레이션 | Off |
-| 해시 검증 | 복사 후 파일 무결성 검증 | Off |
+| 해시 검증 | 해시 검증 옵션 활성화 | Off |
 | 이전 기록 무시 | 상태 파일 무시하고 전체 재수행 | Off |
 
 ### 고급 설정
@@ -162,13 +164,15 @@ conflict_policy: "skip"
 dedup_method: "name-size"
 unclassified_dir: "unclassified"
 quarantine_dir: "quarantine"
-state_file: "~/.shutterpipe/state.json"
-log_file: "~/.shutterpipe/shutterpipe.log"
+state_file: "/absolute/path/to/.shutterpipe/state.json"
+log_file: "/absolute/path/to/.shutterpipe/shutterpipe.log"
 log_json: false
 dry_run: false
 hash_verify: false
 ignore_state: false
 ```
+
+설정 파일의 경로 값은 `~`가 자동 확장되지 않으므로 절대 경로를 사용하세요.
 
 ## 프리셋
 
@@ -181,17 +185,18 @@ ignore_state: false
 
 ## 데이터 저장 위치
 
-ShutterPipe는 설정, 프리셋, 북마크, 경로 히스토리를 서버 측 JSON 파일로 저장합니다.
+ShutterPipe는 설정, 프리셋, 북마크, 경로 히스토리, 백업 이력을 서버 측 JSON 파일로 저장합니다.
 
 ```
 ~/.shutterpipe/
 ├── settings.json       # 현재 설정 (분류 방식, 충돌 정책 등)
 ├── bookmarks.json      # 북마크한 경로 목록
 ├── path-history.json   # 경로 자동완성 히스토리
+├── backup-history.json # 백업 실행 이력 (최근 100개)
 ├── presets/            # 저장된 프리셋 파일들
 │   ├── 일상촬영.json
 │   └── 행사촬영.json
-├── state.json          # 백업 처리 이력
+├── state.json          # 처리 상태(재실행 시 중복 처리 방지)
 └── shutterpipe.log     # 파이프라인 로그
 ```
 
