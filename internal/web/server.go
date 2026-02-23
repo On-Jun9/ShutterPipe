@@ -45,13 +45,14 @@ func (s *Server) setupRoutes() {
 	api.HandleFunc("/presets/load", s.handleLoadPreset).Methods("GET")
 	api.HandleFunc("/presets/delete", s.handleDeletePreset).Methods("DELETE")
 
-	// UserData routes (settings, bookmarks, path history)
+	// UserData routes (settings, bookmarks, path history, backup history)
 	api.HandleFunc("/settings", s.handleGetSettings).Methods("GET")
 	api.HandleFunc("/settings", s.handleSaveSettings).Methods("POST")
 	api.HandleFunc("/bookmarks", s.handleGetBookmarks).Methods("GET")
 	api.HandleFunc("/bookmarks", s.handleSaveBookmarks).Methods("POST")
 	api.HandleFunc("/path-history", s.handleGetPathHistory).Methods("GET")
 	api.HandleFunc("/path-history", s.handleSavePathHistory).Methods("POST")
+	api.HandleFunc("/backup-history", s.handleGetBackupHistory).Methods("GET")
 
 	s.router.PathPrefix("/").Handler(http.FileServer(http.Dir("web/static")))
 }

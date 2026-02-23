@@ -12,6 +12,7 @@
     <link rel="stylesheet" href="css/progress.css">
     <link rel="stylesheet" href="css/log.css">
     <link rel="stylesheet" href="css/preset.css">
+    <link rel="stylesheet" href="css/history.css">
 </head>
 <body>
     <!-- 프리셋 관리 버튼 (우측 상단 고정) -->
@@ -20,6 +21,11 @@
             <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"></path>
             <circle cx="12" cy="12" r="3"></circle>
         </svg>
+    </button>
+
+    <!-- 백업 이력 버튼 (프리셋 버튼 아래) -->
+    <button id="history-toggle-btn" class="history-toggle-btn" title="백업 이력">
+        📋
     </button>
 
     <!-- 프리셋 사이드바 -->
@@ -62,6 +68,27 @@
 
     <!-- 사이드바 백드롭 -->
     <div id="presetBackdrop" class="preset-backdrop" onclick="togglePresetSidebar()"></div>
+
+    <!-- 백업 이력 사이드바 -->
+    <div id="history-sidebar" class="history-sidebar">
+        <div class="history-sidebar-header">
+            <h2>백업 이력</h2>
+            <button id="history-close-btn" class="history-close-btn">&times;</button>
+        </div>
+        <div class="history-filters">
+            <button class="history-filter-btn active" data-filter="all" onclick="setHistoryFilter('all')">전체</button>
+            <button class="history-filter-btn" data-filter="real" onclick="setHistoryFilter('real')">실제 백업</button>
+            <button class="history-filter-btn" data-filter="dry-run" onclick="setHistoryFilter('dry-run')">시뮬레이션</button>
+        </div>
+        <div class="history-sidebar-content">
+            <div id="history-list" class="history-list">
+                <div class="no-history">백업 이력이 없습니다</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 백업 이력 백드롭 -->
+    <div id="history-backdrop" class="history-backdrop"></div>
 
     <div class="container-modern">
         <header class="fade-in" style="text-align: center; margin-bottom: 48px;">
@@ -348,3 +375,4 @@
     <script src="js/path-autocomplete.js"></script>
     <script src="js/backup.js"></script>
     <script src="js/preset.js"></script>
+    <script src="js/history.js"></script>

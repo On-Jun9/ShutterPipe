@@ -5,6 +5,7 @@ nohup.out
 # Binary
 bin/
 shutterpipe.pid
+shutterpipe-web
 
 # IDE
 .vscode/
@@ -19,3 +20,7 @@ Thumbs.db
 
 # Test files
 *.tmp
+
+# Runtime state (contains user file paths)
+shutterpipe.state
+*.state

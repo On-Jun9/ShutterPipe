@@ -30,6 +30,7 @@ type Pipeline struct {
 	state            *state.State
 	logger           *log.Logger
 	progressCallback ProgressCallback
+	userDataManager  *config.UserDataManager
 }
 
 func New(cfg *config.Config) (*Pipeline, error) {
@@ -45,17 +46,23 @@ func New(cfg *config.Config) (*Pipeline, error) {
 
 	quarantinePath := filepath.Join(cfg.Dest, cfg.QuarantineDir)
 
+	userDataManager, err := config.NewUserDataManager()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create user data manager: %w", err)
+	}
+
 	return &Pipeline{
-		cfg:      cfg,
-		scanner:  scanner.New(cfg.IncludeExtensions),
-		meta:     metadata.New(),
-		planner:  planner.New(cfg.Dest, cfg.UnclassifiedDir, cfg.OrganizeStrategy, cfg.EventName),
-		dedup:    policy.NewDedupChecker(cfg.DedupMethod),
-		conflict: policy.NewConflictResolver(cfg.ConflictPolicy, quarantinePath),
-		copier:   copier.New(cfg.Jobs, cfg.DryRun, cfg.HashVerify),
-		verifier: verify.New(cfg.HashVerify),
-		state:    st,
-		logger:   logger,
+		cfg:             cfg,
+		scanner:         scanner.New(cfg.IncludeExtensions),
+		meta:            metadata.New(),
+		planner:         planner.New(cfg.Dest, cfg.UnclassifiedDir, cfg.OrganizeStrategy, cfg.EventName),
+		dedup:           policy.NewDedupChecker(cfg.DedupMethod),
+		conflict:        policy.NewConflictResolver(cfg.ConflictPolicy, quarantinePath),
+		copier:          copier.New(cfg.Jobs, cfg.DryRun, cfg.HashVerify),
+		verifier:        verify.New(cfg.HashVerify),
+		state:           st,
+		logger:          logger,
+		userDataManager: userDataManager,
 	}, nil
 }
 
@@ -114,15 +121,32 @@ func (p *Pipeline) Run() (*types.RunSummary, error) {
 
 	entries, err := p.scanner.Scan(p.cfg.Source)
 	if err != nil {
+		// Save failure history for scan errors
+		endTime := time.Now()
+		summary := &types.RunSummary{
+			StartTime: startTime,
+			EndTime:   endTime,
+			Duration:  endTime.Sub(startTime),
+			Failed:    1,
+		}
+
+		historyEntry := types.BackupHistoryEntry{
+			ID:        historyEntryID(startTime),
+			Summary:   *summary,
+			Config:    p.configToBackupConfig(),
+			Status:    types.BackupStatusFailed,
+			CreatedAt: startTime,
+		}
+
+		if saveErr := p.userDataManager.AddHistoryEntry(historyEntry); saveErr != nil {
+			p.logger.Error("Failed to save backup history", saveErr)
+		}
+
 		return nil, err
 	}
 
 	p.logger.Info("Found " + strconv.Itoa(len(entries)) + " files")
 
-	fmt.Printf("DEBUG: Config IgnoreState=%v, DryRun=%v\n", p.cfg.IgnoreState, p.cfg.DryRun) // DEBUG
-
-	fmt.Println("DEBUG: Sending metadata analysis status...") // DEBUG
-	fmt.Println("DEBUG: Sending metadata analysis status...") // DEBUG
 	if p.progressCallback != nil {
 		p.progressCallback(ProgressUpdate{
 			Type:    "status",
@@ -130,17 +154,13 @@ func (p *Pipeline) Run() (*types.RunSummary, error) {
 			Total:   len(entries),
 		})
 	}
-	fmt.Println("DEBUG: Metadata status sent.") // DEBUG
 
 	var tasks []types.CopyTask
 	var unclassifiedCount int
 	var filteredCount int
 
-	fmt.Printf("DEBUG: Starting loop for %d entries\n", len(entries)) // DEBUG
 	for i, entry := range entries {
-		// fmt.Printf("DEBUG: Processing entry %d: %s\n", i, entry.Path) // Too verbose
 		if i%100 == 0 {
-			fmt.Printf("DEBUG: Progress callback at %d\n", i) // DEBUG
 			if p.progressCallback != nil {
 				p.progressCallback(ProgressUpdate{
 					Type:    "analysis_progress",
@@ -212,6 +232,25 @@ func (p *Pipeline) Run() (*types.RunSummary, error) {
 		summary.EndTime = time.Now()
 		summary.Duration = summary.EndTime.Sub(startTime)
 		p.logger.Summary(*summary)
+
+		// Save backup history
+		status := types.BackupStatusSuccess
+		if summary.Failed > 0 {
+			status = types.BackupStatusFailed
+		}
+
+		historyEntry := types.BackupHistoryEntry{
+			ID:        historyEntryID(summary.StartTime),
+			Summary:   *summary,
+			Config:    p.configToBackupConfig(),
+			Status:    status,
+			CreatedAt: summary.StartTime,
+		}
+
+		if err := p.userDataManager.AddHistoryEntry(historyEntry); err != nil {
+			p.logger.Error("Failed to save backup history", err)
+			// Don't fail the backup if history save fails
+		}
 
 		// Wait a bit to ensure previous progress messages are sent
 		time.Sleep(100 * time.Millisecond)
@@ -288,6 +327,25 @@ func (p *Pipeline) Run() (*types.RunSummary, error) {
 
 	p.logger.Summary(*summary)
 
+	// Save backup history
+	status := types.BackupStatusSuccess
+	if summary.Failed > 0 {
+		status = types.BackupStatusFailed
+	}
+
+	historyEntry := types.BackupHistoryEntry{
+		ID:        historyEntryID(summary.StartTime),
+		Summary:   *summary,
+		Config:    p.configToBackupConfig(),
+		Status:    status,
+		CreatedAt: summary.StartTime,
+	}
+
+	if err := p.userDataManager.AddHistoryEntry(historyEntry); err != nil {
+		p.logger.Error("Failed to save backup history", err)
+		// Don't fail the backup if history save fails
+	}
+
 	// Wait a bit to ensure previous progress messages are sent
 	time.Sleep(100 * time.Millisecond)
 
@@ -303,4 +361,29 @@ func (p *Pipeline) Run() (*types.RunSummary, error) {
 
 func (p *Pipeline) Close() error {
 	return p.logger.Close()
+}
+
+func historyEntryID(t time.Time) string {
+	return strconv.FormatInt(t.UnixNano(), 10)
+}
+
+// configToBackupConfig converts Config to BackupConfig for history entry.
+func (p *Pipeline) configToBackupConfig() types.BackupConfig {
+	return types.BackupConfig{
+		Source:            p.cfg.Source,
+		Dest:              p.cfg.Dest,
+		OrganizeStrategy:  p.cfg.OrganizeStrategy,
+		EventName:         p.cfg.EventName,
+		ConflictPolicy:    p.cfg.ConflictPolicy,
+		DedupMethod:       p.cfg.DedupMethod,
+		DryRun:            p.cfg.DryRun,
+		HashVerify:        p.cfg.HashVerify,
+		IgnoreState:       p.cfg.IgnoreState,
+		DateFilterStart:   p.cfg.DateFilterStart,
+		DateFilterEnd:     p.cfg.DateFilterEnd,
+		Jobs:              p.cfg.Jobs,
+		IncludeExtensions: p.cfg.IncludeExtensions,
+		UnclassifiedDir:   p.cfg.UnclassifiedDir,
+		QuarantineDir:     p.cfg.QuarantineDir,
+	}
 }

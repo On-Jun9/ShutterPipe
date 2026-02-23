@@ -1,11 +1,28 @@
 // Backup Module
 // 백업 실행 및 WebSocket 통신
 
+// UI 초기화 함수
+function resetBackupUI(message = '오류 발생') {
+    const progressBar = document.getElementById('progressBar');
+    const progressPercent = document.getElementById('progressPercent');
+    const progressText = document.getElementById('progressText');
+
+    progressBar.classList.remove('pulse');
+    progressBar.style.width = '0%';
+    progressPercent.textContent = '0%';
+    progressText.textContent = message;
+
+    document.getElementById('fileList').innerHTML =
+        '<p style="font-size: 14px; color: var(--color-text-tertiary); text-align: center;">파일 처리 목록이 여기에 표시됩니다...</p>';
+    document.getElementById('summarySection').style.display = 'none';
+}
+
 // 백업 시작
 async function startBackup() {
     addLogEntry('백업 시작 버튼 클릭됨', 'info');
 
-    if (isRunning) {
+    // 중복 클릭 방지 (시작 중 또는 실행 중)
+    if (isRunning || runStartPending) {
         addLogEntry('이미 백업이 실행 중입니다.', 'warning');
         alert('이미 백업이 실행 중입니다.');
         return;
@@ -20,72 +37,76 @@ async function startBackup() {
         return;
     }
 
-    // 히스토리에 추가
-    if (typeof addToPathHistory === 'function') {
-        await addToPathHistory('source', source);
-        await addToPathHistory('dest', dest);
-    }
-
-    addLogEntry(`설정 확인: Source=${source}, Dest=${dest}`, 'info');
-
-    // 날짜 필터 (날짜만 전송, 타임존 없음)
-    const dateFilterStart = document.getElementById('dateFilterStart').value;
-    const dateFilterEnd = document.getElementById('dateFilterEnd').value;
-
-    const config = {
-        source: source,
-        dest: dest,
-        organize_strategy: document.getElementById('organizeStrategy').value,
-        event_name: document.getElementById('eventName').value,
-        conflict_policy: document.getElementById('conflictPolicy').value,
-        dedup_method: document.getElementById('dedupMethod').value,
-        dry_run: document.getElementById('dryRun').checked,
-        hash_verify: document.getElementById('hashVerify').checked,
-        ignore_state: document.getElementById('ignoreState').checked,
-
-        // 날짜 필터 (YYYY-MM-DD 형식, 타임존 무시하고 날짜만 비교)
-        date_filter_start: dateFilterStart || null,
-        date_filter_end: dateFilterEnd || null,
-
-        // 고급 설정
-        include_extensions: includeExtensions,
-        jobs: parseInt(document.getElementById('jobs').value) || 0,
-        unclassified_dir: document.getElementById('unclassifiedDir').value || 'unclassified',
-        quarantine_dir: document.getElementById('quarantineDir').value || 'quarantine',
-        state_file: document.getElementById('stateFile').value,
-        log_file: document.getElementById('logFile').value,
-        log_json: document.getElementById('logJson').checked
-    };
+    // 상태 설정 (경로 검증 직후, 비동기 작업 전)
+    // 이제부터 모든 비동기 작업이 플래그 보호를 받음
+    runStartPending = true;
+    isRunning = true;
+    runRequestSent = false;
+    hasShownCloseAlert = false;  // 중복 알림 방지 플래그 초기화
+    document.getElementById('startBtn').disabled = true;
 
     try {
+        // 히스토리에 추가 (플래그 설정 후이므로 중복 클릭 방지)
+        if (typeof addToPathHistory === 'function') {
+            await addToPathHistory('source', source);
+            await addToPathHistory('dest', dest);
+        }
+
+        addLogEntry(`설정 확인: Source=${source}, Dest=${dest}`, 'info');
+
+        // 날짜 필터 (날짜만 전송, 타임존 없음)
+        const dateFilterStart = document.getElementById('dateFilterStart').value;
+        const dateFilterEnd = document.getElementById('dateFilterEnd').value;
+
+        const config = {
+            source: source,
+            dest: dest,
+            organize_strategy: document.getElementById('organizeStrategy').value,
+            event_name: document.getElementById('eventName').value,
+            conflict_policy: document.getElementById('conflictPolicy').value,
+            dedup_method: document.getElementById('dedupMethod').value,
+            dry_run: document.getElementById('dryRun').checked,
+            hash_verify: document.getElementById('hashVerify').checked,
+            ignore_state: document.getElementById('ignoreState').checked,
+
+            // 날짜 필터 (YYYY-MM-DD 형식, 타임존 무시하고 날짜만 비교)
+            date_filter_start: dateFilterStart || null,
+            date_filter_end: dateFilterEnd || null,
+
+            // 고급 설정
+            include_extensions: includeExtensions,
+            jobs: parseInt(document.getElementById('jobs').value) || 0,
+            unclassified_dir: document.getElementById('unclassifiedDir').value || 'unclassified',
+            quarantine_dir: document.getElementById('quarantineDir').value || 'quarantine',
+            state_file: document.getElementById('stateFile').value,
+            log_file: document.getElementById('logFile').value,
+            log_json: document.getElementById('logJson').checked
+        };
         // Step 1: Connect WebSocket FIRST
         addLogEntry('WebSocket 연결 시도 중...', 'info');
         await connectWebSocket();
         addLogEntry('WebSocket 연결 성공. 서버에 실행 요청 전송 중...', 'info');
 
-        // Step 2: Send Run Request
-        const response = await fetch('/api/run', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(config)
-        });
-
-        addLogEntry(`서버 응답 수신: Status ${response.status}`, response.ok ? 'success' : 'error');
-
-        if (!response.ok) {
-            const error = await response.text();
-            addLogEntry(`서버 요청 실패: ${error}`, 'error');
-            alert('백업 시작 실패: ' + error);
-            // Close WS if failed
-            if (ws) {
-                ws.close();
-                ws = null;
-            }
-            return;
+        // Step 1.5: Verify WebSocket is still connected before API request
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+            throw new Error('WebSocket 연결이 끊어졌습니다. 다시 시도해주세요.');
         }
 
-        isRunning = true;
-        document.getElementById('startBtn').disabled = true;
+        // Step 2: Send Run Request
+        runRequestSent = true;
+        const runResult = await startBackupRunOnServer(config);
+
+        const statusText = runResult.status || 'NETWORK_ERROR';
+        addLogEntry(`서버 응답 수신: Status ${statusText}`, runResult.success ? 'success' : 'error');
+
+        if (!runResult.success) {
+            const message = runResult.error || '알 수 없는 오류';
+            throw new Error('백업 시작 실패: ' + message);
+        }
+
+        // API 요청 성공 → 시작 완료, 실행 중
+        runStartPending = false;
+        // isRunning은 true 유지
 
         // 진행 상황 초기화
         document.getElementById('progressBar').style.width = '0%';
@@ -101,10 +122,22 @@ async function startBackup() {
         addLogEntry(`실행 중 예외 발생: ${error.message}`, 'error');
         alert('오류: ' + error.message);
 
-        // Reset UI state on error
+        // 상태 복구 (모든 플래그 리셋)
+        runStartPending = false;
         isRunning = false;
-        document.getElementById('startBtn').disabled = false;
+        runRequestSent = false;
 
+        // UI 초기화
+        resetBackupUI('오류 발생');
+
+        // 버튼 복구 (경로 검증 상태 반영)
+        if (typeof enableBackupButton === 'function') {
+            enableBackupButton();
+        } else {
+            document.getElementById('startBtn').disabled = false;
+        }
+
+        // WebSocket 정리
         if (ws) {
             ws.close();
             ws = null;
@@ -135,11 +168,8 @@ function connectWebSocket() {
             console.error('WebSocket error:', error);
             addLogEntry('WebSocket 연결 오류 발생', 'error');
 
-            // Reset UI if error occurs during connection
-            if (isRunning) {
-                isRunning = false;
-                document.getElementById('startBtn').disabled = false;
-            }
+            // ws.onerror는 에러 로깅만 담당
+            // 상태 복구는 ws.onclose에서만 처리 (error -> close 순서 방지)
             reject(new Error('WebSocket connection failed'));
         };
 
@@ -147,11 +177,18 @@ function connectWebSocket() {
             console.log('WebSocket closed');
             addLogEntry(`WebSocket 연결 종료 (Code: ${event.code})`, 'warning');
 
-            // Reset UI if closed unexpectedly while running
-            if (isRunning) {
-                isRunning = false;
-                document.getElementById('startBtn').disabled = false;
-                addLogEntry('서버와의 연결이 끊겨 작업이 중단되었습니다.', 'error');
+            // /api/run 전송 이후에는 서버에서 작업이 계속될 수 있으므로 경고
+            const backupMayStillBeRunning = runRequestSent || (!runStartPending && isRunning);
+            if (backupMayStillBeRunning) {
+                // 중복 알림 방지
+                if (!hasShownCloseAlert) {
+                    hasShownCloseAlert = true;
+                    addLogEntry('서버와의 연결이 끊겼습니다. 백업 상태를 확인할 수 없습니다.', 'error');
+                    alert('서버와의 연결이 끊어졌습니다.\n\n백업이 계속 진행 중일 수 있으므로,\n페이지를 새로고침하여 상태를 확인하세요.');
+                }
+
+                // 상태는 유지 (재클릭 방지)
+                // 사용자가 페이지를 새로고침하여 상태를 확인해야 함
             }
         };
     });
@@ -198,8 +235,18 @@ function handleProgressUpdate(update) {
         }
 
     } else if (update.type === 'complete') {
+        // 상태 복구
+        runStartPending = false;
         isRunning = false;
-        document.getElementById('startBtn').disabled = false;
+        runRequestSent = false;
+
+        // 버튼 복구
+        if (typeof enableBackupButton === 'function') {
+            enableBackupButton();
+        } else {
+            document.getElementById('startBtn').disabled = false;
+        }
+
         progressBar.classList.remove('pulse');
         progressBar.style.width = '100%';
         progressPercent.textContent = '100%';
@@ -208,16 +255,33 @@ function handleProgressUpdate(update) {
         addLogEntry('백업 작업이 완료되었습니다.', 'success');
         showSummary(update.summary);
 
+        // Reload backup history after completion
+        if (typeof loadHistoryList === 'function') {
+            loadHistoryList();
+        }
+
         if (ws) {
             ws.close();
             ws = null;
         }
     } else if (update.type === 'error') {
+        // 상태 복구
+        runStartPending = false;
         isRunning = false;
-        document.getElementById('startBtn').disabled = false;
-        progressBar.classList.remove('pulse');
-        alert('오류: ' + update.error);
+        runRequestSent = false;
+
+        // 버튼 복구
+        if (typeof enableBackupButton === 'function') {
+            enableBackupButton();
+        } else {
+            document.getElementById('startBtn').disabled = false;
+        }
+
+        // UI 초기화
+        resetBackupUI('오류 발생');
+
         addLogEntry('오류 발생: ' + update.error, 'error');
+        alert('오류: ' + update.error);
 
         if (ws) {
             ws.close();
@@ -250,56 +314,6 @@ function addFileToList(filename, action) {
 
     fileList.appendChild(entry);
     fileList.scrollTop = fileList.scrollHeight;
-}
-
-// 용량을 적절한 단위로 포맷
-function formatBytes(bytes) {
-    if (bytes === 0) return '0 B';
-    const gb = bytes / (1024 * 1024 * 1024);
-    const mb = bytes / (1024 * 1024);
-
-    if (gb >= 1) {
-        return gb.toFixed(2) + ' GB';
-    } else if (mb >= 1) {
-        return mb.toFixed(2) + ' MB';
-    } else {
-        return (bytes / 1024).toFixed(2) + ' KB';
-    }
-}
-
-// 속도를 적절한 단위로 포맷
-function formatSpeed(bytesPerSecond) {
-    if (bytesPerSecond === 0) return '0 B/s';
-
-    const gbps = bytesPerSecond / (1024 * 1024 * 1024);
-    const mbps = bytesPerSecond / (1024 * 1024);
-    const kbps = bytesPerSecond / 1024;
-
-    if (gbps >= 1) {
-        return gbps.toFixed(2) + ' GB/s';
-    } else if (mbps >= 1) {
-        return mbps.toFixed(2) + ' MB/s';
-    } else if (kbps >= 1) {
-        return kbps.toFixed(2) + ' KB/s';
-    } else {
-        return bytesPerSecond.toFixed(2) + ' B/s';
-    }
-}
-
-// 시간을 적절한 단위로 포맷
-function formatDuration(seconds) {
-    if (seconds === 0) return '0초';
-
-    const hours = Math.floor(seconds / 3600);
-    const minutes = Math.floor((seconds % 3600) / 60);
-    const secs = seconds % 60;
-
-    const parts = [];
-    if (hours > 0) parts.push(`${hours}시간`);
-    if (minutes > 0) parts.push(`${minutes}분`);
-    if (secs > 0 || parts.length === 0) parts.push(`${secs}초`);
-
-    return parts.join(' ');
 }
 
 // 요약 표시

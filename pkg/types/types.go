@@ -177,3 +177,45 @@ type Bookmarks struct {
 	Dest      []string  `json:"dest"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
+
+// BackupStatus represents the status of a backup operation.
+type BackupStatus string
+
+const (
+	BackupStatusSuccess BackupStatus = "success"
+	BackupStatusFailed  BackupStatus = "failed"
+)
+
+// BackupConfig contains the configuration used for a backup operation.
+type BackupConfig struct {
+	Source            string           `json:"source"`
+	Dest              string           `json:"dest"`
+	OrganizeStrategy  OrganizeStrategy `json:"organize_strategy"`
+	EventName         string           `json:"event_name,omitempty"`
+	ConflictPolicy    ConflictPolicy   `json:"conflict_policy"`
+	DedupMethod       DedupMethod      `json:"dedup_method"`
+	DryRun            bool             `json:"dry_run"`
+	HashVerify        bool             `json:"hash_verify"`
+	IgnoreState       bool             `json:"ignore_state"`
+	DateFilterStart   string           `json:"date_filter_start,omitempty"`
+	DateFilterEnd     string           `json:"date_filter_end,omitempty"`
+	Jobs              int              `json:"jobs"`
+	IncludeExtensions []string         `json:"include_extensions"`
+	UnclassifiedDir   string           `json:"unclassified_dir"`
+	QuarantineDir     string           `json:"quarantine_dir"`
+}
+
+// BackupHistoryEntry represents a single backup session record.
+type BackupHistoryEntry struct {
+	ID        string       `json:"id"`
+	Summary   RunSummary   `json:"summary"`
+	Config    BackupConfig `json:"config"`
+	Status    BackupStatus `json:"status"`
+	CreatedAt time.Time    `json:"created_at"`
+}
+
+// BackupHistory stores the collection of backup history entries.
+type BackupHistory struct {
+	Entries   []BackupHistoryEntry `json:"entries"`
+	UpdatedAt time.Time            `json:"updated_at"`
+}

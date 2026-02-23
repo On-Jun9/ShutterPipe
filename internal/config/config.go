@@ -82,8 +82,14 @@ func (c *Config) Validate() error {
 	if c.Dest == "" {
 		return &ValidationError{Field: "dest", Message: "destination path is required"}
 	}
-	if c.Jobs < 1 {
+	// Jobs: 0 = auto (use CPU cores), negative = invalid (set to 1)
+	if c.Jobs < 0 {
 		c.Jobs = 1
+	} else if c.Jobs == 0 {
+		c.Jobs = runtime.NumCPU()
+		if c.Jobs < 1 {
+			c.Jobs = 4
+		}
 	}
 
 	homeDir, _ := os.UserHomeDir()

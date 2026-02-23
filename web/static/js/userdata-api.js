@@ -1,5 +1,51 @@
 // UserData API - Settings, Bookmarks, PathHistory management
 
+async function parseApiErrorResponse(response) {
+    const contentType = response.headers.get('content-type') || '';
+
+    if (contentType.includes('application/json')) {
+        try {
+            const errorData = await response.json();
+            const message = errorData?.message || errorData?.error || `서버 오류 (${response.status})`;
+            return { field: errorData?.field, error: message };
+        } catch (parseError) {
+            return { error: `서버 오류 (${response.status})` };
+        }
+    }
+
+    const errorText = await response.text();
+    return { error: errorText || `서버 오류 (${response.status})` };
+}
+
+// =============================================================================
+// Run API
+// =============================================================================
+
+async function startBackupRunOnServer(config) {
+    try {
+        const response = await fetch('/api/run', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(config)
+        });
+
+        if (!response.ok) {
+            const parsedError = await parseApiErrorResponse(response);
+            return {
+                success: false,
+                status: response.status,
+                field: parsedError.field,
+                error: parsedError.error
+            };
+        }
+
+        return { success: true, status: response.status };
+    } catch (error) {
+        console.error('백업 시작 요청 실패:', error);
+        return { success: false, error: error.message };
+    }
+}
+
 // =============================================================================
 // Settings API
 // =============================================================================
@@ -28,15 +74,19 @@ async function saveSettingsToServer(settings) {
             body: JSON.stringify(settings)
         });
         if (!response.ok) {
-            throw new Error(`Failed to save settings: ${response.status}`);
+            const parsedError = await parseApiErrorResponse(response);
+            if (typeof showNotification === 'function') {
+                showNotification(`설정 저장 실패: ${parsedError.error}`, 'error');
+            }
+            return { success: false, field: parsedError.field, error: parsedError.error };
         }
-        return true;
+        return { success: true };
     } catch (error) {
         console.error('설정 저장 실패:', error);
         if (typeof showNotification === 'function') {
-            showNotification('설정 저장 실패', 'error');
+            showNotification(`설정 저장 실패: ${error.message}`, 'error');
         }
-        return false;
+        return { success: false, error: error.message };
     }
 }
 
@@ -68,15 +118,19 @@ async function saveBookmarksToServer(bookmarks) {
             body: JSON.stringify(bookmarks)
         });
         if (!response.ok) {
-            throw new Error(`Failed to save bookmarks: ${response.status}`);
+            const parsedError = await parseApiErrorResponse(response);
+            if (typeof showNotification === 'function') {
+                showNotification(`북마크 저장 실패: ${parsedError.error}`, 'error');
+            }
+            return { success: false, field: parsedError.field, error: parsedError.error };
         }
-        return true;
+        return { success: true };
     } catch (error) {
         console.error('북마크 저장 실패:', error);
         if (typeof showNotification === 'function') {
-            showNotification('북마크 저장 실패', 'error');
+            showNotification(`북마크 저장 실패: ${error.message}`, 'error');
         }
-        return false;
+        return { success: false, error: error.message };
     }
 }
 
@@ -108,15 +162,39 @@ async function savePathHistoryToServer(history) {
             body: JSON.stringify(history)
         });
         if (!response.ok) {
-            throw new Error(`Failed to save path history: ${response.status}`);
+            const parsedError = await parseApiErrorResponse(response);
+            if (typeof showNotification === 'function') {
+                showNotification(`경로 히스토리 저장 실패: ${parsedError.error}`, 'error');
+            }
+            return { success: false, field: parsedError.field, error: parsedError.error };
         }
-        return true;
+        return { success: true };
     } catch (error) {
         console.error('경로 히스토리 저장 실패:', error);
         if (typeof showNotification === 'function') {
-            showNotification('경로 히스토리 저장 실패', 'error');
+            showNotification(`경로 히스토리 저장 실패: ${error.message}`, 'error');
         }
-        return false;
+        return { success: false, error: error.message };
+    }
+}
+
+// =============================================================================
+// BackupHistory API
+// =============================================================================
+
+async function loadBackupHistoryFromServer(limit = 20) {
+    try {
+        const response = await fetch(`/api/backup-history?limit=${limit}`);
+        if (!response.ok) {
+            throw new Error(`Failed to load backup history: ${response.status}`);
+        }
+        return await response.json();
+    } catch (error) {
+        console.error('백업 이력 로드 실패:', error);
+        if (typeof showNotification === 'function') {
+            showNotification('백업 이력 로드 실패', 'error');
+        }
+        return null;
     }
 }
 
@@ -140,8 +218,8 @@ async function migrateFromLocalStorage() {
     if (savedConfig) {
         try {
             const config = JSON.parse(savedConfig);
-            const success = await saveSettingsToServer(config);
-            if (!success) {
+            const result = await saveSettingsToServer(config);
+            if (!result.success) {
                 migrationSuccess = false;
             } else {
                 console.log('✓ 설정 마이그레이션 완료');
@@ -157,8 +235,8 @@ async function migrateFromLocalStorage() {
     if (savedBookmarks) {
         try {
             const bookmarks = JSON.parse(savedBookmarks);
-            const success = await saveBookmarksToServer(bookmarks);
-            if (!success) {
+            const result = await saveBookmarksToServer(bookmarks);
+            if (!result.success) {
                 migrationSuccess = false;
             } else {
                 console.log('✓ 북마크 마이그레이션 완료');
@@ -174,8 +252,8 @@ async function migrateFromLocalStorage() {
     if (savedHistory) {
         try {
             const history = JSON.parse(savedHistory);
-            const success = await savePathHistoryToServer(history);
-            if (!success) {
+            const result = await savePathHistoryToServer(history);
+            if (!result.success) {
                 migrationSuccess = false;
             } else {
                 console.log('✓ 경로 히스토리 마이그레이션 완료');
