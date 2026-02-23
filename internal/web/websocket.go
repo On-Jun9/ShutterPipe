@@ -47,7 +47,8 @@ func (h *Hub) Run() {
 			h.mu.Unlock()
 
 		case message := <-h.broadcast:
-			h.mu.RLock()
+			// broadcast 중에 block된 클라이언트를 map에서 제거할 수 있으므로 write lock을 사용한다.
+			h.mu.Lock()
 			for client := range h.clients {
 				select {
 				case client.send <- message:
@@ -56,7 +57,7 @@ func (h *Hub) Run() {
 					delete(h.clients, client)
 				}
 			}
-			h.mu.RUnlock()
+			h.mu.Unlock()
 		}
 	}
 }
