@@ -46,6 +46,29 @@ async function startBackupRunOnServer(config) {
     }
 }
 
+async function cancelBackupRunOnServer() {
+    try {
+        const response = await fetch('/api/run/cancel', {
+            method: 'POST'
+        });
+
+        if (!response.ok) {
+            const parsedError = await parseApiErrorResponse(response);
+            return {
+                success: false,
+                status: response.status,
+                field: parsedError.field,
+                error: parsedError.error
+            };
+        }
+
+        return { success: true, status: response.status };
+    } catch (error) {
+        console.error('백업 취소 요청 실패:', error);
+        return { success: false, error: error.message };
+    }
+}
+
 // =============================================================================
 // Settings API
 // =============================================================================

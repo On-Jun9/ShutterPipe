@@ -318,9 +318,12 @@
             </div>
         </div>
 
-        <div style="margin-bottom: 24px;" class="fade-in" style="animation-delay: 0.2s;">
-            <button id="startBtn" onclick="startBackup()" class="btn-success">
+        <div style="margin-bottom: 24px; display: flex; gap: 12px;" class="fade-in" style="animation-delay: 0.2s;">
+            <button id="startBtn" onclick="startBackup()" class="btn-success" style="flex: 1;">
                 백업 시작
+            </button>
+            <button id="cancelBtn" onclick="cancelBackup()" class="btn-danger" style="min-width: 120px;" disabled>
+                취소
             </button>
         </div>
 

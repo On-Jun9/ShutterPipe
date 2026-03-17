@@ -182,8 +182,9 @@ type Bookmarks struct {
 type BackupStatus string
 
 const (
-	BackupStatusSuccess BackupStatus = "success"
-	BackupStatusFailed  BackupStatus = "failed"
+	BackupStatusSuccess  BackupStatus = "success"
+	BackupStatusFailed   BackupStatus = "failed"
+	BackupStatusCanceled BackupStatus = "canceled"
 )
 
 // BackupConfig contains the configuration used for a backup operation.

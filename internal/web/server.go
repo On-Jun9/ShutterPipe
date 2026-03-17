@@ -37,6 +37,7 @@ func (s *Server) setupRoutes() {
 	api.HandleFunc("/config", s.handleGetConfig).Methods("GET")
 	api.HandleFunc("/config", s.handleSaveConfig).Methods("POST")
 	api.HandleFunc("/run", s.handleRun).Methods("POST")
+	api.HandleFunc("/run/cancel", s.handleCancelRun).Methods("POST")
 	api.HandleFunc("/ws", s.handleWebSocket)
 
 	// Preset routes

@@ -1,13 +1,19 @@
 package web
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/On-Jun9/ShutterPipe/internal/config"
+	"github.com/On-Jun9/ShutterPipe/pkg/types"
 )
 
 // decodeAPIErrorResponse는 테스트 코드 동작을 검증하거나 보조합니다.
@@ -96,6 +102,146 @@ func TestHandleRun_ReturnsConflictWhenAlreadyRunning(t *testing.T) {
 	if response.Message != "backup already running" {
 		t.Fatalf("unexpected message: %s", response.Message)
 	}
+}
+
+// TestHandleCancelRun_ReturnsConflictWhenNotRunning는 테스트 코드 동작을 검증하거나 보조합니다.
+func TestHandleCancelRun_ReturnsConflictWhenNotRunning(t *testing.T) {
+	// 실행 중인 백업이 없으면 취소 요청은 409 JSON 에러를 반환해야 한다.
+	s := &Server{}
+	clearActiveRunCancel()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/run/cancel", nil)
+	rr := httptest.NewRecorder()
+	s.handleCancelRun(rr, req)
+
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("expected status 409, got %d", rr.Code)
+	}
+	if decodeAPIErrorResponse(t, rr).Message != "backup is not running" {
+		t.Fatalf("unexpected cancel error message")
+	}
+}
+
+// TestHandleCancelRun_RequestsCancellationWhenRunning는 테스트 코드 동작을 검증하거나 보조합니다.
+func TestHandleCancelRun_RequestsCancellationWhenRunning(t *testing.T) {
+	// 실행 중인 백업이 있으면 취소 함수를 호출하고 200을 반환해야 한다.
+	s := &Server{}
+	called := false
+	setActiveRunCancel(func() {
+		called = true
+	})
+	t.Cleanup(clearActiveRunCancel)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/run/cancel", nil)
+	rr := httptest.NewRecorder()
+	s.handleCancelRun(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rr.Code)
+	}
+	if !called {
+		t.Fatal("expected cancel function to be called")
+	}
+
+	var body map[string]string
+	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if body["status"] != "cancelling" {
+		t.Fatalf("unexpected response body: %+v", body)
+	}
+}
+
+// TestHandleRun_AfterCancelMutexReleasedForNewRun은 취소 완료 후 runMutex가 해제되어
+// 새 백업 요청이 409 없이 처리되어야 함을 검증한다.
+func TestHandleRun_AfterCancelMutexReleasedForNewRun(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", filepath.Join(tmpDir, "home"))
+
+	sourceDir := filepath.Join(tmpDir, "src")
+	destDir := filepath.Join(tmpDir, "dest")
+	if err := os.MkdirAll(sourceDir, 0755); err != nil {
+		t.Fatalf("failed to create source dir: %v", err)
+	}
+	if err := os.MkdirAll(destDir, 0755); err != nil {
+		t.Fatalf("failed to create dest dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceDir, "photo.jpg"), []byte("photo"), 0644); err != nil {
+		t.Fatalf("failed to write source file: %v", err)
+	}
+
+	s := &Server{hub: NewHub()}
+	go s.hub.Run()
+
+	cfg := config.Config{
+		Source:            sourceDir,
+		Dest:              destDir,
+		IncludeExtensions: []string{"jpg"},
+		Jobs:              1,
+		DedupMethod:       types.DedupMethodNameSize,
+		ConflictPolicy:    types.ConflictPolicySkip,
+		OrganizeStrategy:  types.OrganizeByDate,
+		UnclassifiedDir:   "unclassified",
+		QuarantineDir:     "quarantine",
+		StateFile:         filepath.Join(tmpDir, "state.json"),
+		LogFile:           filepath.Join(tmpDir, "shutterpipe.log"),
+	}
+	body, _ := json.Marshal(cfg)
+
+	// 첫 번째 실행 시작
+	req1 := httptest.NewRequest(http.MethodPost, "/api/run", bytes.NewReader(body))
+	rr1 := httptest.NewRecorder()
+	s.handleRun(rr1, req1)
+	if rr1.Code != http.StatusOK {
+		t.Fatalf("expected 200 for first run, got %d", rr1.Code)
+	}
+
+	// 취소 요청
+	reqC := httptest.NewRequest(http.MethodPost, "/api/run/cancel", nil)
+	rrC := httptest.NewRecorder()
+	s.handleCancelRun(rrC, reqC)
+	if rrC.Code != http.StatusOK {
+		t.Fatalf("expected 200 for cancel, got %d", rrC.Code)
+	}
+
+	// 고루틴이 종료되어 runMutex가 해제될 때까지 대기
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if runMutex.TryLock() {
+			runMutex.Unlock()
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !runMutex.TryLock() {
+		t.Fatal("runMutex still locked after cancel: goroutine did not release it in time")
+	}
+	runMutex.Unlock()
+
+	// 두 번째 실행이 409 없이 시작되어야 한다
+	body2, _ := json.Marshal(cfg)
+	req2 := httptest.NewRequest(http.MethodPost, "/api/run", bytes.NewReader(body2))
+	rr2 := httptest.NewRecorder()
+	s.handleRun(rr2, req2)
+	if rr2.Code == http.StatusConflict {
+		t.Fatal("second run got 409: runMutex was not released after cancel")
+	}
+
+	// 두 번째 고루틴 정리
+	t.Cleanup(func() {
+		if fn := getActiveRunCancel(); fn != nil {
+			fn()
+		}
+		cleanupDeadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(cleanupDeadline) {
+			if runMutex.TryLock() {
+				runMutex.Unlock()
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		clearActiveRunCancel()
+	})
 }
 
 // TestHandleBrowse_ReturnsNotFoundForMissingPath는 테스트 코드 동작을 검증하거나 보조합니다.

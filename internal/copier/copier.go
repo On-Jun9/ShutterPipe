@@ -1,6 +1,7 @@
 package copier
 
 import (
+	"context"
 	"io"
 	"os"
 	"path/filepath"
@@ -28,23 +29,52 @@ type CopyResult struct {
 	Error error
 }
 
-func (c *Copier) CopyAll(tasks []types.CopyTask, resultChan chan<- CopyResult) {
-	taskChan := make(chan types.CopyTask, len(tasks))
+func (c *Copier) CopyAll(ctx context.Context, tasks []types.CopyTask, resultChan chan<- CopyResult) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	if ctx.Err() != nil {
+		close(resultChan)
+		return
+	}
+
+	workers := c.workers
+	if workers < 1 {
+		workers = 1
+	}
+
+	taskChan := make(chan types.CopyTask)
 
 	var wg sync.WaitGroup
-	for i := 0; i < c.workers; i++ {
+	for i := 0; i < workers; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for task := range taskChan {
-				result := c.copyOne(task)
-				resultChan <- result
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case task, ok := <-taskChan:
+					if !ok {
+						return
+					}
+					result := c.copyOne(ctx, task)
+					resultChan <- result
+				}
 			}
 		}()
 	}
 
 	for _, task := range tasks {
-		taskChan <- task
+		select {
+		case <-ctx.Done():
+			close(taskChan)
+			wg.Wait()
+			close(resultChan)
+			return
+		case taskChan <- task:
+		}
 	}
 	close(taskChan)
 
@@ -52,7 +82,13 @@ func (c *Copier) CopyAll(tasks []types.CopyTask, resultChan chan<- CopyResult) {
 	close(resultChan)
 }
 
-func (c *Copier) copyOne(task types.CopyTask) CopyResult {
+func (c *Copier) copyOne(ctx context.Context, task types.CopyTask) CopyResult {
+	if err := ctx.Err(); err != nil {
+		task.Status = types.TaskStatusFailed
+		task.Error = err.Error()
+		return CopyResult{Task: task, Error: err}
+	}
+
 	if c.dryRun {
 		task.Status = types.TaskStatusCompleted
 		task.Action = types.CopyActionCopied
@@ -67,7 +103,7 @@ func (c *Copier) copyOne(task types.CopyTask) CopyResult {
 
 	partPath := task.DestPath + ".part"
 
-	if err := c.atomicCopy(task.Source.Path, partPath, task.DestPath); err != nil {
+	if err := c.atomicCopy(ctx, task.Source.Path, partPath, task.DestPath); err != nil {
 		os.Remove(partPath)
 		task.Status = types.TaskStatusFailed
 		task.Error = err.Error()
@@ -78,7 +114,7 @@ func (c *Copier) copyOne(task types.CopyTask) CopyResult {
 	return CopyResult{Task: task}
 }
 
-func (c *Copier) atomicCopy(src, partDest, finalDest string) error {
+func (c *Copier) atomicCopy(ctx context.Context, src, partDest, finalDest string) error {
 	srcFile, err := os.Open(src)
 	if err != nil {
 		return err
@@ -90,11 +126,31 @@ func (c *Copier) atomicCopy(src, partDest, finalDest string) error {
 		return err
 	}
 
-	_, err = io.Copy(dstFile, srcFile)
-	if closeErr := dstFile.Close(); closeErr != nil && err == nil {
-		err = closeErr
+	buf := make([]byte, 1024*1024)
+	for {
+		if err := ctx.Err(); err != nil {
+			dstFile.Close()
+			return err
+		}
+
+		n, readErr := srcFile.Read(buf)
+		if n > 0 {
+			if _, err := dstFile.Write(buf[:n]); err != nil {
+				dstFile.Close()
+				return err
+			}
+		}
+
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			dstFile.Close()
+			return readErr
+		}
 	}
-	if err != nil {
+
+	if err := dstFile.Close(); err != nil {
 		return err
 	}
 

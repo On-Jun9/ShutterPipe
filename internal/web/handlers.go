@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -113,17 +114,27 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
-type ProgressUpdate struct {
-	Type     string            `json:"type"`
-	Current  int               `json:"current,omitempty"`
-	Total    int               `json:"total,omitempty"`
-	Filename string            `json:"filename,omitempty"`
-	Action   types.CopyAction  `json:"action,omitempty"`
-	Summary  *types.RunSummary `json:"summary,omitempty"`
-	Error    string            `json:"error,omitempty"`
+var runMutex sync.Mutex
+var runCancelMu sync.Mutex
+var activeRunCancel context.CancelFunc
+
+func setActiveRunCancel(cancel context.CancelFunc) {
+	runCancelMu.Lock()
+	activeRunCancel = cancel
+	runCancelMu.Unlock()
 }
 
-var runMutex sync.Mutex
+func clearActiveRunCancel() {
+	runCancelMu.Lock()
+	activeRunCancel = nil
+	runCancelMu.Unlock()
+}
+
+func getActiveRunCancel() context.CancelFunc {
+	runCancelMu.Lock()
+	defer runCancelMu.Unlock()
+	return activeRunCancel
+}
 
 func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 	if !runMutex.TryLock() {
@@ -138,9 +149,6 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// DEBUG LOG: Check received configuration
-	fmt.Printf("Received Run Request: Source='%s', Dest='%s'\n", cfg.Source, cfg.Dest)
-
 	if err := cfg.Validate(); err != nil {
 		runMutex.Unlock()
 		var validationErr *config.ValidationError
@@ -153,11 +161,16 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	setActiveRunCancel(cancelRun)
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "started"})
 
 	go func() {
 		defer runMutex.Unlock()
+		defer clearActiveRunCancel()
+		defer cancelRun()
 		defer func() {
 			if r := recover(); r != nil {
 				fmt.Printf("PANIC RECOVERED: %v\n", r)
@@ -171,27 +184,40 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		fmt.Println("Pipeline initialized")
-
-		defer func() {
-			fmt.Println("Closing pipeline...")
-			p.Close()
-			fmt.Println("Pipeline closed")
-		}()
+		defer p.Close()
 
 		p.SetProgressCallback(func(update pipeline.ProgressUpdate) {
 			s.broadcastProgress(update)
 		})
 
-		fmt.Println("Starting pipeline run...")
-		_, err = p.Run()
+		summary, err := p.RunWithContext(runCtx)
 		if err != nil {
-			fmt.Printf("Pipeline run failed: %v\n", err)
+			if errors.Is(err, pipeline.ErrRunCanceled) {
+				s.broadcastProgress(pipeline.ProgressUpdate{
+					Type:    "cancelled",
+					Message: "백업이 취소되었습니다.",
+					Summary: summary,
+				})
+				return
+			}
+
 			s.broadcastProgress(pipeline.ProgressUpdate{Type: "error", Error: err.Error()})
 			return
 		}
-		fmt.Println("Pipeline run completed successfully")
 	}()
+}
+
+func (s *Server) handleCancelRun(w http.ResponseWriter, r *http.Request) {
+	cancelRun := getActiveRunCancel()
+	if cancelRun == nil {
+		writeAPIError(w, http.StatusConflict, "backup is not running")
+		return
+	}
+
+	cancelRun()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "cancelling"})
 }
 
 func (s *Server) broadcastJSON(v interface{}) {

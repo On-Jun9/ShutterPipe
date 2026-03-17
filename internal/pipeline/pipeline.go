@@ -1,6 +1,8 @@
 package pipeline
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strconv"
@@ -17,6 +19,8 @@ import (
 	"github.com/On-Jun9/ShutterPipe/internal/verify"
 	"github.com/On-Jun9/ShutterPipe/pkg/types"
 )
+
+var ErrRunCanceled = errors.New("backup run canceled")
 
 type Pipeline struct {
 	cfg              *config.Config
@@ -108,7 +112,18 @@ func (p *Pipeline) shouldIncludeByDate(entry types.FileEntry, meta types.MediaMe
 }
 
 func (p *Pipeline) Run() (*types.RunSummary, error) {
+	return p.RunWithContext(context.Background())
+}
+
+func (p *Pipeline) RunWithContext(ctx context.Context) (*types.RunSummary, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	startTime := time.Now()
+	summary := &types.RunSummary{
+		StartTime: startTime,
+	}
 
 	p.logger.Info("Starting scan: '" + p.cfg.Source + "'")
 
@@ -119,16 +134,18 @@ func (p *Pipeline) Run() (*types.RunSummary, error) {
 		})
 	}
 
-	entries, err := p.scanner.Scan(p.cfg.Source)
+	entries, err := p.scanner.ScanWithContext(ctx, p.cfg.Source)
 	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			summary.ScannedFiles = len(entries)
+			return p.finishCanceledRun(summary, 0)
+		}
+
 		// Save failure history for scan errors
 		endTime := time.Now()
-		summary := &types.RunSummary{
-			StartTime: startTime,
-			EndTime:   endTime,
-			Duration:  endTime.Sub(startTime),
-			Failed:    1,
-		}
+		summary.EndTime = endTime
+		summary.Duration = endTime.Sub(startTime)
+		summary.Failed = 1
 
 		historyEntry := types.BackupHistoryEntry{
 			ID:        historyEntryID(startTime),
@@ -145,6 +162,8 @@ func (p *Pipeline) Run() (*types.RunSummary, error) {
 		return nil, err
 	}
 
+	summary.ScannedFiles = len(entries)
+
 	p.logger.Info("Found " + strconv.Itoa(len(entries)) + " files")
 
 	if p.progressCallback != nil {
@@ -160,6 +179,12 @@ func (p *Pipeline) Run() (*types.RunSummary, error) {
 	var filteredCount int
 
 	for i, entry := range entries {
+		if errors.Is(ctx.Err(), context.Canceled) {
+			summary.TotalFiles = filteredCount
+			summary.Unclassified = unclassifiedCount
+			return p.finishCanceledRun(summary, 0)
+		}
+
 		if i%100 == 0 {
 			if p.progressCallback != nil {
 				p.progressCallback(ProgressUpdate{
@@ -211,6 +236,12 @@ func (p *Pipeline) Run() (*types.RunSummary, error) {
 		tasks = append(tasks, task)
 	}
 
+	summary.TotalFiles = filteredCount
+	summary.Unclassified = unclassifiedCount
+	if errors.Is(ctx.Err(), context.Canceled) {
+		return p.finishCanceledRun(summary, 0)
+	}
+
 	// Ensure 100% analysis progress is sent
 	if p.progressCallback != nil {
 		p.progressCallback(ProgressUpdate{
@@ -221,36 +252,9 @@ func (p *Pipeline) Run() (*types.RunSummary, error) {
 		})
 	}
 
-	summary := &types.RunSummary{
-		ScannedFiles: len(entries),
-		TotalFiles:   filteredCount,
-		Unclassified: unclassifiedCount,
-		StartTime:    startTime,
-	}
-
 	if len(tasks) == 0 {
-		summary.EndTime = time.Now()
-		summary.Duration = summary.EndTime.Sub(startTime)
-		p.logger.Summary(*summary)
-
-		// Save backup history
-		status := types.BackupStatusSuccess
-		if summary.Failed > 0 {
-			status = types.BackupStatusFailed
-		}
-
-		historyEntry := types.BackupHistoryEntry{
-			ID:        historyEntryID(summary.StartTime),
-			Summary:   *summary,
-			Config:    p.configToBackupConfig(),
-			Status:    status,
-			CreatedAt: summary.StartTime,
-		}
-
-		if err := p.userDataManager.AddHistoryEntry(historyEntry); err != nil {
-			p.logger.Error("Failed to save backup history", err)
-			// Don't fail the backup if history save fails
-		}
+		p.finalizeSummary(summary, 0)
+		p.persistRunResult(summary, types.BackupStatusSuccess)
 
 		// Wait a bit to ensure previous progress messages are sent
 		time.Sleep(100 * time.Millisecond)
@@ -265,12 +269,16 @@ func (p *Pipeline) Run() (*types.RunSummary, error) {
 	}
 
 	resultChan := make(chan copier.CopyResult, len(tasks))
-	go p.copier.CopyAll(tasks, resultChan)
+	go p.copier.CopyAll(ctx, tasks, resultChan)
 
 	var bytesCopied int64
 	processed := 0
 
 	for result := range resultChan {
+		if errors.Is(result.Error, context.Canceled) {
+			continue
+		}
+
 		processed++
 		p.logger.Progress(processed, len(tasks), result.Task.Source.Name)
 
@@ -312,13 +320,46 @@ func (p *Pipeline) Run() (*types.RunSummary, error) {
 		}
 	}
 
+	if errors.Is(ctx.Err(), context.Canceled) && processed < len(tasks) {
+		return p.finishCanceledRun(summary, bytesCopied)
+	}
+
+	p.finalizeSummary(summary, bytesCopied)
+	status := types.BackupStatusSuccess
+	if summary.Failed > 0 {
+		status = types.BackupStatusFailed
+	}
+	p.persistRunResult(summary, status)
+
+	// Wait a bit to ensure previous progress messages are sent
+	time.Sleep(100 * time.Millisecond)
+
+	if p.progressCallback != nil {
+		p.progressCallback(ProgressUpdate{
+			Type:    "complete",
+			Summary: summary,
+		})
+	}
+
+	return summary, nil
+}
+
+func (p *Pipeline) finishCanceledRun(summary *types.RunSummary, bytesCopied int64) (*types.RunSummary, error) {
+	p.finalizeSummary(summary, bytesCopied)
+	p.persistRunResult(summary, types.BackupStatusCanceled)
+	return summary, ErrRunCanceled
+}
+
+func (p *Pipeline) finalizeSummary(summary *types.RunSummary, bytesCopied int64) {
 	summary.EndTime = time.Now()
-	summary.Duration = summary.EndTime.Sub(startTime)
+	summary.Duration = summary.EndTime.Sub(summary.StartTime)
 	summary.BytesCopied = bytesCopied
 	if summary.Duration.Seconds() > 0 {
 		summary.BytesPerSecond = float64(bytesCopied) / summary.Duration.Seconds()
 	}
+}
 
+func (p *Pipeline) persistRunResult(summary *types.RunSummary, status types.BackupStatus) {
 	if !p.cfg.DryRun {
 		if err := p.state.Save(); err != nil {
 			p.logger.Error("Failed to save state", err)
@@ -326,12 +367,6 @@ func (p *Pipeline) Run() (*types.RunSummary, error) {
 	}
 
 	p.logger.Summary(*summary)
-
-	// Save backup history
-	status := types.BackupStatusSuccess
-	if summary.Failed > 0 {
-		status = types.BackupStatusFailed
-	}
 
 	historyEntry := types.BackupHistoryEntry{
 		ID:        historyEntryID(summary.StartTime),
@@ -345,18 +380,6 @@ func (p *Pipeline) Run() (*types.RunSummary, error) {
 		p.logger.Error("Failed to save backup history", err)
 		// Don't fail the backup if history save fails
 	}
-
-	// Wait a bit to ensure previous progress messages are sent
-	time.Sleep(100 * time.Millisecond)
-
-	if p.progressCallback != nil {
-		p.progressCallback(ProgressUpdate{
-			Type:    "complete",
-			Summary: summary,
-		})
-	}
-
-	return summary, nil
 }
 
 func (p *Pipeline) Close() error {

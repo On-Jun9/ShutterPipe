@@ -1,6 +1,8 @@
 package pipeline
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -675,5 +677,122 @@ func TestPipelineRun_StateAndHistorySaveFailuresAreIgnored(t *testing.T) {
 	}
 	if summary == nil || summary.Copied != 1 {
 		t.Fatalf("unexpected summary while save failures are ignored: %+v", summary)
+	}
+}
+
+// TestPipelineRunWithContext_CancelAfterAllTasksComplete_RecordsSuccess는 모든 작업이 완료된 후
+// 취소 신호가 도착한 경우 성공으로 기록되어야 함을 검증한다.
+// processed == len(tasks)이면 ctx.Err() 취소 신호를 무시해야 한다.
+func TestPipelineRunWithContext_CancelAfterAllTasksComplete_RecordsSuccess(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", filepath.Join(tmpDir, "home"))
+
+	sourceDir := filepath.Join(tmpDir, "src")
+	destDir := filepath.Join(tmpDir, "dest")
+	if err := os.MkdirAll(sourceDir, 0755); err != nil {
+		t.Fatalf("failed to create source dir: %v", err)
+	}
+	if err := os.MkdirAll(destDir, 0755); err != nil {
+		t.Fatalf("failed to create dest dir: %v", err)
+	}
+
+	srcPath := filepath.Join(sourceDir, "photo.jpg")
+	if err := os.WriteFile(srcPath, []byte("photo-bytes"), 0644); err != nil {
+		t.Fatalf("failed to write source file: %v", err)
+	}
+
+	cfg := newTestConfig(tmpDir, sourceDir, destDir)
+	p, err := New(cfg)
+	if err != nil {
+		t.Fatalf("failed to create pipeline: %v", err)
+	}
+	defer p.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// 마지막 파일 복사 완료 직후 progress 콜백에서 취소:
+	// 이 시점에 processed == len(tasks)이므로 취소 조건(processed < len(tasks))이 false
+	p.SetProgressCallback(func(update ProgressUpdate) {
+		if update.Type == "progress" {
+			cancel()
+		}
+	})
+
+	summary, err := p.RunWithContext(ctx)
+	if err != nil {
+		t.Fatalf("expected success when all tasks complete before cancel, got %v", err)
+	}
+	if summary == nil {
+		t.Fatal("expected non-nil summary")
+	}
+
+	m, mErr := config.NewUserDataManager()
+	if mErr != nil {
+		t.Fatalf("failed to create user data manager: %v", mErr)
+	}
+	history, hErr := m.LoadBackupHistory()
+	if hErr != nil {
+		t.Fatalf("failed to load backup history: %v", hErr)
+	}
+	if len(history.Entries) == 0 {
+		t.Fatal("expected history entry")
+	}
+	if history.Entries[0].Status != types.BackupStatusSuccess {
+		t.Fatalf("expected success history status, got %s", history.Entries[0].Status)
+	}
+}
+
+// TestPipelineRunWithContext_CanceledContextRecordsCanceledHistory는 테스트 코드 동작을 검증하거나 보조합니다.
+func TestPipelineRunWithContext_CanceledContextRecordsCanceledHistory(t *testing.T) {
+	// 취소된 실행은 ErrRunCanceled을 반환하고 이력 상태를 canceled로 저장해야 한다.
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", filepath.Join(tmpDir, "home"))
+
+	sourceDir := filepath.Join(tmpDir, "src")
+	destDir := filepath.Join(tmpDir, "dest")
+	if err := os.MkdirAll(sourceDir, 0755); err != nil {
+		t.Fatalf("failed to create source dir: %v", err)
+	}
+	if err := os.MkdirAll(destDir, 0755); err != nil {
+		t.Fatalf("failed to create dest dir: %v", err)
+	}
+
+	srcPath := filepath.Join(sourceDir, "photo.jpg")
+	if err := os.WriteFile(srcPath, []byte("photo-bytes"), 0644); err != nil {
+		t.Fatalf("failed to write source file: %v", err)
+	}
+
+	cfg := newTestConfig(tmpDir, sourceDir, destDir)
+	p, err := New(cfg)
+	if err != nil {
+		t.Fatalf("failed to create pipeline: %v", err)
+	}
+	defer p.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	summary, err := p.RunWithContext(ctx)
+	if !errors.Is(err, ErrRunCanceled) {
+		t.Fatalf("expected ErrRunCanceled, got %v", err)
+	}
+	if summary == nil {
+		t.Fatal("expected non-nil summary for canceled run")
+	}
+
+	m, err := config.NewUserDataManager()
+	if err != nil {
+		t.Fatalf("failed to create user data manager: %v", err)
+	}
+	history, err := m.LoadBackupHistory()
+	if err != nil {
+		t.Fatalf("failed to load backup history: %v", err)
+	}
+	if len(history.Entries) == 0 {
+		t.Fatal("expected canceled history entry")
+	}
+	if history.Entries[0].Status != types.BackupStatusCanceled {
+		t.Fatalf("expected canceled history status, got %s", history.Entries[0].Status)
 	}
 }

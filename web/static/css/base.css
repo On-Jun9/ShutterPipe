@@ -183,6 +183,13 @@ body {
   transform: translateY(0);
 }
 
+.btn-danger:disabled {
+  background: linear-gradient(135deg, #cbd5e1 0%, #94a3b8 100%);
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+}
+
 /* Small Button */
 .btn-small {
   background: var(--color-bg-secondary);

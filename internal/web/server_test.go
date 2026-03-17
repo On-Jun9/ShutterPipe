@@ -106,3 +106,18 @@ func TestHandleWebSocket_UpgradeFailurePath(t *testing.T) {
 		t.Fatalf("expected non-200 response for invalid websocket handshake, got %d", rr.Code)
 	}
 }
+
+// TestServerSetupRoutes_ContainsRunCancelRoute는 테스트 코드 동작을 검증하거나 보조합니다.
+func TestServerSetupRoutes_ContainsRunCancelRoute(t *testing.T) {
+	// /api/run/cancel 라우트가 등록되어 취소 핸들러로 연결되어야 한다.
+	s := NewServer()
+	clearActiveRunCancel()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/run/cancel", nil)
+	rr := httptest.NewRecorder()
+	s.router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("expected status 409 when no run is active, got %d", rr.Code)
+	}
+}

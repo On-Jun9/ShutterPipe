@@ -17,6 +17,14 @@ function resetBackupUI(message = '오류 발생') {
     document.getElementById('summarySection').style.display = 'none';
 }
 
+function setCancelButtonState(enabled, pending = false) {
+    const cancelBtn = document.getElementById('cancelBtn');
+    if (!cancelBtn) return;
+
+    cancelBtn.disabled = !enabled || pending;
+    cancelBtn.textContent = pending ? '취소 요청 중...' : '취소';
+}
+
 // 백업 시작
 async function startBackup() {
     addLogEntry('백업 시작 버튼 클릭됨', 'info');
@@ -42,8 +50,11 @@ async function startBackup() {
     runStartPending = true;
     isRunning = true;
     runRequestSent = false;
+    runCancelPending = false;
+    runCancelRequested = false;
     hasShownCloseAlert = false;  // 중복 알림 방지 플래그 초기화
     document.getElementById('startBtn').disabled = true;
+    setCancelButtonState(false);
 
     try {
         // 히스토리에 추가 (플래그 설정 후이므로 중복 클릭 방지)
@@ -107,6 +118,7 @@ async function startBackup() {
         // API 요청 성공 → 시작 완료, 실행 중
         runStartPending = false;
         // isRunning은 true 유지
+        setCancelButtonState(true);
 
         // 진행 상황 초기화
         document.getElementById('progressBar').style.width = '0%';
@@ -126,9 +138,12 @@ async function startBackup() {
         runStartPending = false;
         isRunning = false;
         runRequestSent = false;
+        runCancelPending = false;
+        runCancelRequested = false;
 
         // UI 초기화
         resetBackupUI('오류 발생');
+        setCancelButtonState(false);
 
         // 버튼 복구 (경로 검증 상태 반영)
         if (typeof enableBackupButton === 'function') {
@@ -142,6 +157,96 @@ async function startBackup() {
             ws.close();
             ws = null;
         }
+    }
+}
+
+// 백업 취소
+async function cancelBackup() {
+    addLogEntry('백업 취소 버튼 클릭됨', 'warning');
+
+    if (!isRunning || runStartPending) {
+        addLogEntry('실행 중인 백업이 없습니다.', 'warning');
+        return;
+    }
+
+    if (runCancelPending || runCancelRequested) {
+        addLogEntry('이미 취소 요청이 진행 중입니다.', 'warning');
+        return;
+    }
+
+    runCancelPending = true;
+    setCancelButtonState(true, true);
+
+    try {
+        const cancelResult = await cancelBackupRunOnServer();
+        const statusText = cancelResult.status || 'NETWORK_ERROR';
+        addLogEntry(`취소 요청 응답 수신: Status ${statusText}`, cancelResult.success ? 'warning' : 'error');
+
+        if (!cancelResult.success) {
+            if (cancelResult.status === 409) {
+                runCancelPending = false;
+                runCancelRequested = false;
+                runStartPending = false;
+                runRequestSent = false;
+
+                if (isRunning) {
+                    // complete/error가 아직 처리되지 않은 경우에만 UI 초기화
+                    isRunning = false;
+                    setCancelButtonState(false);
+                    resetBackupUI('이미 종료됨');
+
+                    if (typeof enableBackupButton === 'function') {
+                        enableBackupButton();
+                    } else {
+                        document.getElementById('startBtn').disabled = false;
+                    }
+
+                    if (ws) {
+                        ws.close();
+                        ws = null;
+                    }
+                }
+
+                addLogEntry('서버에 실행 중인 백업이 없어 UI 상태를 복구했습니다.', 'warning');
+                return;
+            }
+
+            throw new Error(cancelResult.error || '알 수 없는 오류');
+        }
+
+        runCancelPending = false;
+
+        if (!ws) {
+            // onclose가 먼저 발생한 경우 → 'cancelled' WS 메시지가 오지 않으므로 바로 정리
+            isRunning = false;
+            runCancelRequested = false;
+            runRequestSent = false;
+            runStartPending = false;
+            setCancelButtonState(false);
+
+            if (typeof enableBackupButton === 'function') {
+                enableBackupButton();
+            } else {
+                document.getElementById('startBtn').disabled = false;
+            }
+
+            if (typeof loadHistoryList === 'function') {
+                loadHistoryList();
+            }
+
+            addLogEntry('백업이 취소되었습니다.', 'warning');
+        } else {
+            runCancelRequested = true;
+            setCancelButtonState(false);
+            document.getElementById('progressText').textContent = '취소 요청 중...';
+            addLogEntry('백업 취소 요청을 서버에 전달했습니다.', 'warning');
+        }
+    } catch (error) {
+        runCancelPending = false;
+        runCancelRequested = false;
+        setCancelButtonState(isRunning && !runStartPending);
+        addLogEntry(`취소 요청 실패: ${error.message}`, 'error');
+        alert('오류: ' + error.message);
     }
 }
 
@@ -160,7 +265,14 @@ function connectWebSocket() {
         };
 
         ws.onmessage = (event) => {
-            const update = JSON.parse(event.data);
+            let update;
+            try {
+                update = JSON.parse(event.data);
+            } catch (e) {
+                console.error('WebSocket message parse error:', e);
+                addLogEntry('서버 메시지 파싱 오류 발생', 'error');
+                return;
+            }
             handleProgressUpdate(update);
         };
 
@@ -179,7 +291,9 @@ function connectWebSocket() {
 
             // /api/run 전송 이후에는 서버에서 작업이 계속될 수 있으므로 경고
             const backupMayStillBeRunning = runRequestSent || (!runStartPending && isRunning);
-            if (backupMayStillBeRunning) {
+            const cancelInProgress = runCancelPending || runCancelRequested;
+
+            if (backupMayStillBeRunning && !cancelInProgress) {
                 // 중복 알림 방지
                 if (!hasShownCloseAlert) {
                     hasShownCloseAlert = true;
@@ -189,6 +303,31 @@ function connectWebSocket() {
 
                 // 상태는 유지 (재클릭 방지)
                 // 사용자가 페이지를 새로고침하여 상태를 확인해야 함
+            } else if (cancelInProgress) {
+                runStartPending = false;
+                isRunning = false;
+                runRequestSent = false;
+                runCancelPending = false;
+                runCancelRequested = false;
+                ws = null;
+                setCancelButtonState(false);
+
+                if (typeof enableBackupButton === 'function') {
+                    enableBackupButton();
+                } else {
+                    document.getElementById('startBtn').disabled = false;
+                }
+
+                if (typeof loadHistoryList === 'function') {
+                    loadHistoryList();
+                }
+
+                const progressText = document.getElementById('progressText');
+                if (progressText) {
+                    progressText.textContent = '취소 처리 중 연결 종료';
+                }
+
+                addLogEntry('취소 요청 처리 중 WebSocket 연결이 종료되었습니다.', 'info');
             }
         };
     });
@@ -239,6 +378,9 @@ function handleProgressUpdate(update) {
         runStartPending = false;
         isRunning = false;
         runRequestSent = false;
+        runCancelPending = false;
+        runCancelRequested = false;
+        setCancelButtonState(false);
 
         // 버튼 복구
         if (typeof enableBackupButton === 'function') {
@@ -269,6 +411,9 @@ function handleProgressUpdate(update) {
         runStartPending = false;
         isRunning = false;
         runRequestSent = false;
+        runCancelPending = false;
+        runCancelRequested = false;
+        setCancelButtonState(false);
 
         // 버튼 복구
         if (typeof enableBackupButton === 'function') {
@@ -282,6 +427,38 @@ function handleProgressUpdate(update) {
 
         addLogEntry('오류 발생: ' + update.error, 'error');
         alert('오류: ' + update.error);
+
+        if (ws) {
+            ws.close();
+            ws = null;
+        }
+    } else if (update.type === 'cancelled') {
+        // 상태 복구
+        runStartPending = false;
+        isRunning = false;
+        runRequestSent = false;
+        runCancelPending = false;
+        runCancelRequested = false;
+        setCancelButtonState(false);
+
+        // 버튼 복구
+        if (typeof enableBackupButton === 'function') {
+            enableBackupButton();
+        } else {
+            document.getElementById('startBtn').disabled = false;
+        }
+
+        progressBar.classList.remove('pulse');
+        progressText.textContent = update.message || '취소됨';
+        addLogEntry(update.message || '백업 작업이 취소되었습니다.', 'warning');
+
+        if (update.summary) {
+            showSummary(update.summary);
+        }
+
+        if (typeof loadHistoryList === 'function') {
+            loadHistoryList();
+        }
 
         if (ws) {
             ws.close();

@@ -1,6 +1,7 @@
 package copier
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -21,7 +22,7 @@ func TestCopierCopyAll_DryRunMarksCompletedWithoutFileIO(t *testing.T) {
 	}
 
 	resultChan := make(chan CopyResult, 1)
-	c.CopyAll([]types.CopyTask{task}, resultChan)
+	c.CopyAll(context.Background(), []types.CopyTask{task}, resultChan)
 	result := <-resultChan
 
 	if result.Error != nil {
@@ -56,7 +57,7 @@ func TestCopierCopyAll_CopiesFileContent(t *testing.T) {
 	}
 
 	resultChan := make(chan CopyResult, 1)
-	c.CopyAll([]types.CopyTask{task}, resultChan)
+	c.CopyAll(context.Background(), []types.CopyTask{task}, resultChan)
 	result := <-resultChan
 
 	if result.Error != nil {
@@ -97,7 +98,7 @@ func TestCopierCopyAll_RemovesPartFileWhenCopyFails(t *testing.T) {
 	}
 
 	resultChan := make(chan CopyResult, 1)
-	c.CopyAll([]types.CopyTask{task}, resultChan)
+	c.CopyAll(context.Background(), []types.CopyTask{task}, resultChan)
 	result := <-resultChan
 
 	if result.Error == nil {
@@ -135,7 +136,7 @@ func TestCopierCopyAll_ReturnsErrorWhenDestinationDirCannotBeCreated(t *testing.
 
 	c := New(1, false, false)
 	resultChan := make(chan CopyResult, 1)
-	c.CopyAll([]types.CopyTask{task}, resultChan)
+	c.CopyAll(context.Background(), []types.CopyTask{task}, resultChan)
 	result := <-resultChan
 
 	if result.Error == nil {
@@ -162,7 +163,7 @@ func TestCopierCopyAll_ReturnsErrorWhenSourceOpenFails(t *testing.T) {
 
 	c := New(1, false, false)
 	resultChan := make(chan CopyResult, 1)
-	c.CopyAll([]types.CopyTask{task}, resultChan)
+	c.CopyAll(context.Background(), []types.CopyTask{task}, resultChan)
 	result := <-resultChan
 
 	if result.Error == nil {
@@ -183,8 +184,42 @@ func TestCopierAtomicCopy_ReturnsErrorWhenDestinationCreateFails(t *testing.T) {
 	}
 
 	c := New(1, false, false)
-	err := c.atomicCopy(srcPath, "\x00", filepath.Join(tmpDir, "out.jpg"))
+	err := c.atomicCopy(context.Background(), srcPath, "\x00", filepath.Join(tmpDir, "out.jpg"))
 	if err == nil {
 		t.Fatal("expected destination create error")
+	}
+}
+
+// TestCopierCopyAll_CancelledContextStopsBeforeScheduling는 테스트 코드 동작을 검증하거나 보조합니다.
+func TestCopierCopyAll_CancelledContextStopsBeforeScheduling(t *testing.T) {
+	// 컨텍스트가 이미 취소된 경우 작업을 스케줄링하지 않고 종료되어야 한다.
+	tmpDir := t.TempDir()
+	srcPath := filepath.Join(tmpDir, "src.jpg")
+	destPath := filepath.Join(tmpDir, "dest", "out.jpg")
+
+	if err := os.WriteFile(srcPath, []byte("photo"), 0644); err != nil {
+		t.Fatalf("failed to write source file: %v", err)
+	}
+
+	task := types.CopyTask{
+		Source: types.FileEntry{
+			Path: srcPath,
+			Name: "src.jpg",
+		},
+		DestPath: destPath,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	c := New(1, false, false)
+	resultChan := make(chan CopyResult, 1)
+	c.CopyAll(ctx, []types.CopyTask{task}, resultChan)
+
+	if result, ok := <-resultChan; ok {
+		t.Fatalf("expected closed result channel without result, got %+v", result)
+	}
+	if _, err := os.Stat(destPath); !os.IsNotExist(err) {
+		t.Fatalf("expected destination not to be created, stat err=%v", err)
 	}
 }

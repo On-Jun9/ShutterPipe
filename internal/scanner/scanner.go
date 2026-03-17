@@ -1,6 +1,7 @@
 package scanner
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -26,9 +27,21 @@ func New(extensions []string) *Scanner {
 }
 
 func (s *Scanner) Scan(root string) ([]types.FileEntry, error) {
+	return s.ScanWithContext(context.Background(), root)
+}
+
+func (s *Scanner) ScanWithContext(ctx context.Context, root string) ([]types.FileEntry, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	var entries []types.FileEntry
 
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
 		if err != nil {
 			return err
 		}
