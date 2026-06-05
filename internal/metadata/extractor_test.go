@@ -1,6 +1,8 @@
 package metadata
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,6 +10,22 @@ import (
 
 	"github.com/On-Jun9/ShutterPipe/pkg/types"
 )
+
+func TestExtractorExtractWithContext_ReturnsCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	extractor := New()
+	_, err := extractor.ExtractWithContext(ctx, types.FileEntry{
+		Path:      "/path/does/not/exist.jpg",
+		Name:      "missing.jpg",
+		Extension: "jpg",
+	})
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+}
 
 // TestExtractorExtract_UsesXMLForVideo는 테스트 코드 동작을 검증하거나 보조합니다.
 func TestExtractorExtract_UsesXMLForVideo(t *testing.T) {

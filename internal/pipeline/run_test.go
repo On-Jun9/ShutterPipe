@@ -796,3 +796,66 @@ func TestPipelineRunWithContext_CanceledContextRecordsCanceledHistory(t *testing
 		t.Fatalf("expected canceled history status, got %s", history.Entries[0].Status)
 	}
 }
+
+type blockingMetadataExtractor struct {
+	started chan struct{}
+}
+
+func (e *blockingMetadataExtractor) ExtractWithContext(ctx context.Context, _ types.FileEntry) (types.MediaMetadata, error) {
+	close(e.started)
+	<-ctx.Done()
+	return types.MediaMetadata{}, ctx.Err()
+}
+
+func TestPipelineRunWithContext_CancelDuringMetadataExtraction(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", filepath.Join(tmpDir, "home"))
+
+	sourceDir := filepath.Join(tmpDir, "src")
+	destDir := filepath.Join(tmpDir, "dest")
+	if err := os.MkdirAll(sourceDir, 0755); err != nil {
+		t.Fatalf("failed to create source dir: %v", err)
+	}
+	if err := os.MkdirAll(destDir, 0755); err != nil {
+		t.Fatalf("failed to create dest dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceDir, "photo.jpg"), []byte("photo"), 0644); err != nil {
+		t.Fatalf("failed to write source file: %v", err)
+	}
+
+	cfg := newTestConfig(tmpDir, sourceDir, destDir)
+	p, err := New(cfg)
+	if err != nil {
+		t.Fatalf("failed to create pipeline: %v", err)
+	}
+	defer p.Close()
+
+	extractor := &blockingMetadataExtractor{started: make(chan struct{})}
+	p.meta = extractor
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		<-extractor.started
+		cancel()
+	}()
+
+	summary, err := p.RunWithContext(ctx)
+	if !errors.Is(err, ErrRunCanceled) {
+		t.Fatalf("expected ErrRunCanceled, got %v", err)
+	}
+	if summary == nil {
+		t.Fatal("expected canceled run summary")
+	}
+
+	historyManager, err := config.NewUserDataManager()
+	if err != nil {
+		t.Fatalf("failed to create user data manager: %v", err)
+	}
+	history, err := historyManager.LoadBackupHistory()
+	if err != nil {
+		t.Fatalf("failed to load backup history: %v", err)
+	}
+	if len(history.Entries) == 0 || history.Entries[0].Status != types.BackupStatusCanceled {
+		t.Fatalf("expected canceled history entry, got %+v", history.Entries)
+	}
+}

@@ -2,12 +2,39 @@ package copier
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/On-Jun9/ShutterPipe/pkg/types"
 )
+
+type cancelAfterChecksContext struct {
+	checksBeforeCancel int
+	checks             int
+}
+
+func (c *cancelAfterChecksContext) Deadline() (time.Time, bool) {
+	return time.Time{}, false
+}
+
+func (c *cancelAfterChecksContext) Done() <-chan struct{} {
+	return nil
+}
+
+func (c *cancelAfterChecksContext) Err() error {
+	c.checks++
+	if c.checks > c.checksBeforeCancel {
+		return context.Canceled
+	}
+	return nil
+}
+
+func (c *cancelAfterChecksContext) Value(any) any {
+	return nil
+}
 
 // TestCopierCopyAll_DryRunMarksCompletedWithoutFileIO는 테스트 코드 동작을 검증하거나 보조합니다.
 func TestCopierCopyAll_DryRunMarksCompletedWithoutFileIO(t *testing.T) {
@@ -218,6 +245,39 @@ func TestCopierCopyAll_CancelledContextStopsBeforeScheduling(t *testing.T) {
 
 	if result, ok := <-resultChan; ok {
 		t.Fatalf("expected closed result channel without result, got %+v", result)
+	}
+	if _, err := os.Stat(destPath); !os.IsNotExist(err) {
+		t.Fatalf("expected destination not to be created, stat err=%v", err)
+	}
+}
+
+func TestCopierCopyOne_CancelDuringCopyRemovesPartFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	srcPath := filepath.Join(tmpDir, "src.bin")
+	destPath := filepath.Join(tmpDir, "dest", "out.bin")
+	partPath := destPath + ".part"
+
+	data := make([]byte, 2*1024*1024)
+	if err := os.WriteFile(srcPath, data, 0644); err != nil {
+		t.Fatalf("failed to write source file: %v", err)
+	}
+
+	ctx := &cancelAfterChecksContext{checksBeforeCancel: 2}
+	c := New(1, false, false)
+	result := c.copyOne(ctx, types.CopyTask{
+		Source: types.FileEntry{
+			Path: srcPath,
+			Name: "src.bin",
+			Size: int64(len(data)),
+		},
+		DestPath: destPath,
+	})
+
+	if !errors.Is(result.Error, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", result.Error)
+	}
+	if _, err := os.Stat(partPath); !os.IsNotExist(err) {
+		t.Fatalf("expected part file to be removed, stat err=%v", err)
 	}
 	if _, err := os.Stat(destPath); !os.IsNotExist(err) {
 		t.Fatalf("expected destination not to be created, stat err=%v", err)

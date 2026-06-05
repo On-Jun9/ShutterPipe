@@ -22,10 +22,14 @@ import (
 
 var ErrRunCanceled = errors.New("backup run canceled")
 
+type metadataExtractor interface {
+	ExtractWithContext(context.Context, types.FileEntry) (types.MediaMetadata, error)
+}
+
 type Pipeline struct {
 	cfg              *config.Config
 	scanner          *scanner.Scanner
-	meta             *metadata.Extractor
+	meta             metadataExtractor
 	planner          *planner.Planner
 	dedup            *policy.DedupChecker
 	conflict         *policy.ConflictResolver
@@ -200,7 +204,12 @@ func (p *Pipeline) RunWithContext(ctx context.Context) (*types.RunSummary, error
 			continue
 		}
 
-		meta := p.meta.Extract(entry)
+		meta, err := p.meta.ExtractWithContext(ctx, entry)
+		if errors.Is(err, context.Canceled) {
+			summary.TotalFiles = filteredCount
+			summary.Unclassified = unclassifiedCount
+			return p.finishCanceledRun(summary, 0)
+		}
 
 		// Date filter check (EXIF preferred, file mod time fallback)
 		if !p.shouldIncludeByDate(entry, meta) {

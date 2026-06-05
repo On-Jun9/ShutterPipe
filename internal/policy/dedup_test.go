@@ -6,9 +6,35 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/On-Jun9/ShutterPipe/pkg/types"
 )
+
+type cancelHashAfterChecksContext struct {
+	checksBeforeCancel int
+	checks             int
+}
+
+func (c *cancelHashAfterChecksContext) Deadline() (time.Time, bool) {
+	return time.Time{}, false
+}
+
+func (c *cancelHashAfterChecksContext) Done() <-chan struct{} {
+	return nil
+}
+
+func (c *cancelHashAfterChecksContext) Err() error {
+	c.checks++
+	if c.checks > c.checksBeforeCancel {
+		return context.Canceled
+	}
+	return nil
+}
+
+func (c *cancelHashAfterChecksContext) Value(any) any {
+	return nil
+}
 
 // TestDedupChecker_NameSize_ReturnsTrueWhenSizeMatches는 테스트 코드 동작을 검증하거나 보조합니다.
 func TestDedupChecker_NameSize_ReturnsTrueWhenSizeMatches(t *testing.T) {
@@ -181,6 +207,31 @@ func TestDedupChecker_IsDuplicateWithContext_ReturnsCanceled(t *testing.T) {
 
 	checker := NewDedupChecker(types.DedupMethodHash)
 	_, err := checker.IsDuplicateWithContext(ctx, types.FileEntry{Path: srcPath, Size: 12}, destPath)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+}
+
+func TestDedupChecker_IsDuplicateWithContext_CancelsDuringHash(t *testing.T) {
+	tmpDir := t.TempDir()
+	srcPath := filepath.Join(tmpDir, "src.bin")
+	destPath := filepath.Join(tmpDir, "dest.bin")
+	data := make([]byte, 2*1024*1024)
+
+	if err := os.WriteFile(srcPath, data, 0644); err != nil {
+		t.Fatalf("failed to write src file: %v", err)
+	}
+	if err := os.WriteFile(destPath, data, 0644); err != nil {
+		t.Fatalf("failed to write dest file: %v", err)
+	}
+
+	ctx := &cancelHashAfterChecksContext{checksBeforeCancel: 2}
+	checker := NewDedupChecker(types.DedupMethodHash)
+	_, err := checker.IsDuplicateWithContext(ctx, types.FileEntry{
+		Path: srcPath,
+		Size: int64(len(data)),
+	}, destPath)
+
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected context.Canceled, got %v", err)
 	}

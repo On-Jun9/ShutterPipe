@@ -215,30 +215,13 @@ async function cancelBackup() {
         }
 
         runCancelPending = false;
+        runCancelRequested = true;
+        setCancelButtonState(false);
+        document.getElementById('progressText').textContent = '취소 요청 중...';
 
         if (!ws) {
-            // onclose가 먼저 발생한 경우 → 'cancelled' WS 메시지가 오지 않으므로 바로 정리
-            isRunning = false;
-            runCancelRequested = false;
-            runRequestSent = false;
-            runStartPending = false;
-            setCancelButtonState(false);
-
-            if (typeof enableBackupButton === 'function') {
-                enableBackupButton();
-            } else {
-                document.getElementById('startBtn').disabled = false;
-            }
-
-            if (typeof loadHistoryList === 'function') {
-                loadHistoryList();
-            }
-
-            addLogEntry('백업이 취소되었습니다.', 'warning');
+            addLogEntry('취소 요청은 전달되었지만 연결이 끊겨 완료 상태를 확인할 수 없습니다.', 'warning');
         } else {
-            runCancelRequested = true;
-            setCancelButtonState(false);
-            document.getElementById('progressText').textContent = '취소 요청 중...';
             addLogEntry('백업 취소 요청을 서버에 전달했습니다.', 'warning');
         }
     } catch (error) {
@@ -286,51 +269,37 @@ function connectWebSocket() {
         };
 
         ws.onclose = (event) => {
-            console.log('WebSocket closed');
-            addLogEntry(`WebSocket 연결 종료 (Code: ${event.code})`, 'warning');
-
-            // /api/run 전송 이후에는 서버에서 작업이 계속될 수 있으므로 경고
             const backupMayStillBeRunning = runRequestSent || (!runStartPending && isRunning);
             const cancelInProgress = runCancelPending || runCancelRequested;
-
-            if (backupMayStillBeRunning && !cancelInProgress) {
-                // 중복 알림 방지
-                if (!hasShownCloseAlert) {
-                    hasShownCloseAlert = true;
-                    addLogEntry('서버와의 연결이 끊겼습니다. 백업 상태를 확인할 수 없습니다.', 'error');
-                    alert('서버와의 연결이 끊어졌습니다.\n\n백업이 계속 진행 중일 수 있으므로,\n페이지를 새로고침하여 상태를 확인하세요.');
-                }
-
-                // 상태는 유지 (재클릭 방지)
-                // 사용자가 페이지를 새로고침하여 상태를 확인해야 함
-            } else if (cancelInProgress) {
-                runStartPending = false;
-                isRunning = false;
-                runRequestSent = false;
-                runCancelPending = false;
-                runCancelRequested = false;
-                ws = null;
-                setCancelButtonState(false);
-
-                if (typeof enableBackupButton === 'function') {
-                    enableBackupButton();
-                } else {
-                    document.getElementById('startBtn').disabled = false;
-                }
-
-                if (typeof loadHistoryList === 'function') {
-                    loadHistoryList();
-                }
-
-                const progressText = document.getElementById('progressText');
-                if (progressText) {
-                    progressText.textContent = '취소 처리 중 연결 종료';
-                }
-
-                addLogEntry('취소 요청 처리 중 WebSocket 연결이 종료되었습니다.', 'info');
-            }
+            handleWebSocketClose(event, backupMayStillBeRunning, cancelInProgress);
         };
     });
+}
+
+function handleWebSocketClose(event, backupMayStillBeRunning, cancelInProgress) {
+    console.log('WebSocket closed');
+    addLogEntry(`WebSocket 연결 종료 (Code: ${event.code})`, 'warning');
+    ws = null;
+
+    if (!backupMayStillBeRunning) {
+        return;
+    }
+
+    if (cancelInProgress) {
+        setCancelButtonState(false);
+        const progressText = document.getElementById('progressText');
+        if (progressText) {
+            progressText.textContent = '취소 요청됨 - 완료 상태 확인 불가';
+        }
+        addLogEntry('취소 요청 처리 중 연결이 종료되어 완료 상태를 확인할 수 없습니다.', 'warning');
+    } else {
+        addLogEntry('서버와의 연결이 끊겼습니다. 백업 상태를 확인할 수 없습니다.', 'error');
+    }
+
+    if (!hasShownCloseAlert) {
+        hasShownCloseAlert = true;
+        alert('서버와의 연결이 끊어졌습니다.\n\n백업이 계속 진행 중일 수 있으므로,\n페이지를 새로고침하여 상태를 확인하세요.');
+    }
 }
 
 // 진행 상황 업데이트 처리

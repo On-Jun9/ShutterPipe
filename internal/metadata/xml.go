@@ -1,7 +1,9 @@
 package metadata
 
 import (
+	"context"
 	"encoding/xml"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,39 +26,40 @@ type nonRealTimeMeta struct {
 }
 
 func (e *XMLExtractor) Extract(entry types.FileEntry) types.MediaMetadata {
+	return e.ExtractWithContext(context.Background(), entry)
+}
+
+func (e *XMLExtractor) ExtractWithContext(ctx context.Context, entry types.FileEntry) types.MediaMetadata {
+	ctx = normalizeContext(ctx)
+	if err := ctx.Err(); err != nil {
+		return types.MediaMetadata{Error: err.Error()}
+	}
+
 	xmlPath := e.findXMLPath(entry.Path)
 	if xmlPath == "" {
 		return types.MediaMetadata{Error: "XML metadata file not found"}
 	}
 
-	data, err := os.ReadFile(xmlPath)
-	if err != nil {
-		return types.MediaMetadata{Error: "failed to read XML: " + err.Error()}
-	}
-
-	var meta nonRealTimeMeta
-	if err := xml.Unmarshal(data, &meta); err != nil {
-		return types.MediaMetadata{Error: "failed to parse XML: " + err.Error()}
-	}
-
-	if meta.CreationDate.Value == "" {
-		return types.MediaMetadata{Error: "CreationDate not found in XML"}
-	}
-
-	t, err := time.Parse(time.RFC3339, meta.CreationDate.Value)
-	if err != nil {
-		return types.MediaMetadata{Error: "invalid date format: " + err.Error()}
-	}
-
-	return types.MediaMetadata{
-		CaptureTime: &t,
-		Source:      "XML:CreationDate",
-	}
+	return extractXMLFileWithContext(ctx, xmlPath, "XML:CreationDate")
 }
 
 // ExtractFromXMLFile extracts metadata directly from an XML file
 func (e *XMLExtractor) ExtractFromXMLFile(entry types.FileEntry) types.MediaMetadata {
-	data, err := os.ReadFile(entry.Path)
+	return e.ExtractFromXMLFileWithContext(context.Background(), entry)
+}
+
+func (e *XMLExtractor) ExtractFromXMLFileWithContext(ctx context.Context, entry types.FileEntry) types.MediaMetadata {
+	return extractXMLFileWithContext(normalizeContext(ctx), entry.Path, "XML:CreationDate(direct)")
+}
+
+func extractXMLFileWithContext(ctx context.Context, path, source string) types.MediaMetadata {
+	f, err := os.Open(path)
+	if err != nil {
+		return types.MediaMetadata{Error: "failed to read XML: " + err.Error()}
+	}
+	defer f.Close()
+
+	data, err := io.ReadAll(contextReader{ctx: ctx, r: f})
 	if err != nil {
 		return types.MediaMetadata{Error: "failed to read XML: " + err.Error()}
 	}
@@ -77,7 +80,7 @@ func (e *XMLExtractor) ExtractFromXMLFile(entry types.FileEntry) types.MediaMeta
 
 	return types.MediaMetadata{
 		CaptureTime: &t,
-		Source:      "XML:CreationDate(direct)",
+		Source:      source,
 	}
 }
 
