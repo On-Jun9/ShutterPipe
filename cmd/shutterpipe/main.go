@@ -11,7 +11,7 @@ import (
 )
 
 var (
-	appVersion    = "0.1.0"
+	version        = "dev" // set by ldflags during build
 	cfgFile        string
 	source         string
 	dest           string
@@ -52,7 +52,7 @@ var versionCmd = &cobra.Command{
 	Use:   "version",
 	Short: "Print version information",
 	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println(appVersion)
+		fmt.Println(version)
 	},
 }
 

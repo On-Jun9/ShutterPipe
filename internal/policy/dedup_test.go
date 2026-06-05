@@ -1,6 +1,8 @@
 package policy
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -159,5 +161,27 @@ func TestDedupChecker_Hash_ReturnsDestinationHashError(t *testing.T) {
 	_, err := checker.IsDuplicate(types.FileEntry{Path: srcPath, Size: 3}, destDir)
 	if err == nil {
 		t.Fatal("expected destination hash error")
+	}
+}
+
+func TestDedupChecker_IsDuplicateWithContext_ReturnsCanceled(t *testing.T) {
+	tmpDir := t.TempDir()
+	srcPath := filepath.Join(tmpDir, "src.jpg")
+	destPath := filepath.Join(tmpDir, "dest.jpg")
+
+	if err := os.WriteFile(srcPath, []byte("same-content"), 0644); err != nil {
+		t.Fatalf("failed to write src file: %v", err)
+	}
+	if err := os.WriteFile(destPath, []byte("same-content"), 0644); err != nil {
+		t.Fatalf("failed to write dest file: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	checker := NewDedupChecker(types.DedupMethodHash)
+	_, err := checker.IsDuplicateWithContext(ctx, types.FileEntry{Path: srcPath, Size: 12}, destPath)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
 	}
 }

@@ -121,3 +121,51 @@ func TestServerSetupRoutes_ContainsRunCancelRoute(t *testing.T) {
 		t.Fatalf("expected status 409 when no run is active, got %d", rr.Code)
 	}
 }
+
+func TestServerSetupRoutes_RejectsCrossOriginStateChange(t *testing.T) {
+	s := NewServer()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/run/cancel", nil)
+	req.Header.Set("Origin", "https://attacker.example")
+	rr := httptest.NewRecorder()
+	s.router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("expected status 403 for cross-origin request, got %d", rr.Code)
+	}
+
+	var response APIErrorResponse
+	if err := json.NewDecoder(rr.Body).Decode(&response); err != nil {
+		t.Fatalf("failed to decode error response: %v", err)
+	}
+	if response.Message != "cross-origin request denied" {
+		t.Fatalf("unexpected response: %+v", response)
+	}
+}
+
+func TestServerSetupRoutes_AllowsSameOriginStateChange(t *testing.T) {
+	s := NewServer()
+	clearActiveRunCancel()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/run/cancel", nil)
+	req.Header.Set("Origin", "http://"+req.Host)
+	rr := httptest.NewRecorder()
+	s.router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("expected handler status 409 for same-origin request, got %d", rr.Code)
+	}
+}
+
+func TestServerSetupRoutes_RejectsDifferentSchemeStateChange(t *testing.T) {
+	s := NewServer()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/run/cancel", nil)
+	req.Header.Set("Origin", "https://"+req.Host)
+	rr := httptest.NewRecorder()
+	s.router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("expected status 403 for different-scheme request, got %d", rr.Code)
+	}
+}

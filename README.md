@@ -94,7 +94,8 @@ cd ShutterPipe
 ### 6. CLI 모드
 
 ```bash
-go build -o bin/shutterpipe ./cmd/shutterpipe
+VERSION=$(git describe --tags --always --dirty)
+go build -ldflags="-X main.version=${VERSION}" -o bin/shutterpipe ./cmd/shutterpipe
 ./bin/shutterpipe run -s /Volumes/SD_CARD -d /Volumes/NAS/Photos
 ```
 

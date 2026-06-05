@@ -24,3 +24,6 @@ Thumbs.db
 # Runtime state (contains user file paths)
 shutterpipe.state
 *.state
+
+# Agent runtime state
+.omx/

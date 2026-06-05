@@ -216,7 +216,12 @@ func (p *Pipeline) RunWithContext(ctx context.Context) (*types.RunSummary, error
 
 		// Skip duplicate check if IgnoreState is enabled
 		if !p.cfg.IgnoreState {
-			isDup, err := p.dedup.IsDuplicate(entry, task.DestPath)
+			isDup, err := p.dedup.IsDuplicateWithContext(ctx, entry, task.DestPath)
+			if errors.Is(err, context.Canceled) {
+				summary.TotalFiles = filteredCount
+				summary.Unclassified = unclassifiedCount
+				return p.finishCanceledRun(summary, 0)
+			}
 			if err == nil && isDup {
 				task.Status = types.TaskStatusSkipped
 				task.Action = types.CopyActionSkipped

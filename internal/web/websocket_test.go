@@ -101,6 +101,45 @@ func TestHandleWebSocket_UpgradeSuccessAndWritePumpDeliversMessage(t *testing.T)
 	}
 }
 
+func TestHandleWebSocket_RejectsCrossOriginUpgrade(t *testing.T) {
+	s := NewServer()
+
+	ts := httptest.NewServer(s.router)
+	defer ts.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/api/ws"
+	headers := http.Header{}
+	headers.Set("Origin", "https://attacker.example")
+
+	conn, response, err := websocket.DefaultDialer.Dial(wsURL, headers)
+	if conn != nil {
+		conn.Close()
+	}
+	if err == nil {
+		t.Fatal("expected cross-origin websocket upgrade to fail")
+	}
+	if response == nil || response.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected status 403, got response=%v", response)
+	}
+}
+
+func TestHandleWebSocket_AllowsSameOriginUpgrade(t *testing.T) {
+	s := NewServer()
+
+	ts := httptest.NewServer(s.router)
+	defer ts.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/api/ws"
+	headers := http.Header{}
+	headers.Set("Origin", ts.URL)
+
+	conn, response, err := websocket.DefaultDialer.Dial(wsURL, headers)
+	if err != nil {
+		t.Fatalf("expected same-origin websocket upgrade to succeed, response=%v err=%v", response, err)
+	}
+	conn.Close()
+}
+
 // waitForHubClientCount는 테스트 코드 동작을 검증하거나 보조합니다.
 func waitForHubClientCount(t *testing.T, h *Hub, expected int) {
 	t.Helper()

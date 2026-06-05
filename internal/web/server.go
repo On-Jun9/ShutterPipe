@@ -32,6 +32,7 @@ func (s *Server) SetVersion(v string) {
 
 func (s *Server) setupRoutes() {
 	api := s.router.PathPrefix("/api").Subrouter()
+	api.Use(requireSameOrigin)
 	api.HandleFunc("/version", s.handleVersion).Methods("GET")
 	api.HandleFunc("/browse", s.handleBrowse).Methods("GET")
 	api.HandleFunc("/config", s.handleGetConfig).Methods("GET")
