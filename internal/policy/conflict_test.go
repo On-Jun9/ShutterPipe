@@ -80,6 +80,46 @@ func TestConflictResolver_Rename(t *testing.T) {
 	}
 }
 
+func TestConflictResolver_RenameReservesDestinationsWithinRun(t *testing.T) {
+	tmpDir := t.TempDir()
+	resolver := NewConflictResolver(types.ConflictPolicyRename, filepath.Join(tmpDir, "quarantine"))
+	destPath := filepath.Join(tmpDir, "photo.jpg")
+
+	first := resolver.Resolve(&types.CopyTask{
+		Source:   types.FileEntry{Path: "/card-a/photo.jpg", Name: "photo.jpg"},
+		DestPath: destPath,
+	})
+	second := resolver.Resolve(&types.CopyTask{
+		Source:   types.FileEntry{Path: "/card-b/photo.jpg", Name: "photo.jpg"},
+		DestPath: destPath,
+	})
+
+	if first.Skip || first.Action != types.CopyActionCopied || first.DestPath != destPath {
+		t.Fatalf("unexpected first resolution: %+v", first)
+	}
+	expectedSecond := filepath.Join(tmpDir, "photo_1.jpg")
+	if second.Skip || second.Action != types.CopyActionRenamed || second.DestPath != expectedSecond {
+		t.Fatalf("expected reserved destination to rename to %s, got %+v", expectedSecond, second)
+	}
+}
+
+func TestConflictResolver_ResetReservationsStartsANewRunScope(t *testing.T) {
+	tmpDir := t.TempDir()
+	resolver := NewConflictResolver(types.ConflictPolicyRename, filepath.Join(tmpDir, "quarantine"))
+	destPath := filepath.Join(tmpDir, "photo.jpg")
+	task := &types.CopyTask{Source: types.FileEntry{Name: "photo.jpg"}, DestPath: destPath}
+
+	first := resolver.Resolve(task)
+	if first.Action != types.CopyActionCopied || first.DestPath != destPath {
+		t.Fatalf("unexpected first resolution: %+v", first)
+	}
+	resolver.ResetReservations()
+	second := resolver.Resolve(task)
+	if second.Action != types.CopyActionCopied || second.DestPath != destPath {
+		t.Fatalf("reservation leaked into the next run: %+v", second)
+	}
+}
+
 // TestConflictResolver_Overwrite는 테스트 코드 동작을 검증하거나 보조합니다.
 func TestConflictResolver_Overwrite(t *testing.T) {
 	// overwrite 정책은 같은 경로를 유지하고 overwrite 액션을 반환해야 한다.
@@ -102,6 +142,22 @@ func TestConflictResolver_Overwrite(t *testing.T) {
 	}
 	if res.DestPath != existingFile {
 		t.Fatalf("expected same destination path, got %s", res.DestPath)
+	}
+}
+
+func TestConflictResolver_OverwriteDistinguishesReservedFromDiskConflict(t *testing.T) {
+	tmpDir := t.TempDir()
+	resolver := NewConflictResolver(types.ConflictPolicyOverwrite, filepath.Join(tmpDir, "quarantine"))
+	destPath := filepath.Join(tmpDir, "photo.jpg")
+
+	first := resolver.Resolve(&types.CopyTask{Source: types.FileEntry{Path: "/a/photo.jpg"}, DestPath: destPath})
+	second := resolver.Resolve(&types.CopyTask{Source: types.FileEntry{Path: "/b/photo.jpg"}, DestPath: destPath})
+
+	if first.ReplaceReserved || first.Action != types.CopyActionCopied {
+		t.Fatalf("unexpected first resolution: %+v", first)
+	}
+	if !second.ReplaceReserved || second.Action != types.CopyActionCopied || second.DestPath != destPath {
+		t.Fatalf("reserved overwrite must replace the planned task without claiming a disk overwrite: %+v", second)
 	}
 }
 

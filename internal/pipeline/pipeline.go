@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"time"
 
@@ -16,14 +18,21 @@ import (
 	"github.com/On-Jun9/ShutterPipe/internal/policy"
 	"github.com/On-Jun9/ShutterPipe/internal/scanner"
 	"github.com/On-Jun9/ShutterPipe/internal/state"
-	"github.com/On-Jun9/ShutterPipe/internal/verify"
 	"github.com/On-Jun9/ShutterPipe/pkg/types"
 )
 
-var ErrRunCanceled = errors.New("backup run canceled")
+var (
+	ErrRunCanceled      = errors.New("backup run canceled")
+	ErrRunFailed        = errors.New("backup run completed with file failures")
+	ErrRunAlreadyActive = errors.New("another backup run is already active")
+)
 
 type metadataExtractor interface {
 	ExtractWithContext(context.Context, types.FileEntry) (types.MediaMetadata, error)
+}
+
+type copyExecutor interface {
+	CopyAll(context.Context, []types.CopyTask, chan<- copier.CopyResult)
 }
 
 type Pipeline struct {
@@ -33,8 +42,7 @@ type Pipeline struct {
 	planner          *planner.Planner
 	dedup            *policy.DedupChecker
 	conflict         *policy.ConflictResolver
-	copier           *copier.Copier
-	verifier         *verify.Verifier
+	copier           copyExecutor
 	state            *state.State
 	logger           *log.Logger
 	progressCallback ProgressCallback
@@ -59,6 +67,8 @@ func New(cfg *config.Config) (*Pipeline, error) {
 		return nil, fmt.Errorf("failed to create user data manager: %w", err)
 	}
 
+	copyWorkers := effectiveCopyWorkers(cfg.Jobs, cfg.ConflictPolicy)
+
 	return &Pipeline{
 		cfg:             cfg,
 		scanner:         scanner.New(cfg.IncludeExtensions),
@@ -66,12 +76,21 @@ func New(cfg *config.Config) (*Pipeline, error) {
 		planner:         planner.New(cfg.Dest, cfg.UnclassifiedDir, cfg.OrganizeStrategy, cfg.EventName),
 		dedup:           policy.NewDedupChecker(cfg.DedupMethod),
 		conflict:        policy.NewConflictResolver(cfg.ConflictPolicy, quarantinePath),
-		copier:          copier.New(cfg.Jobs, cfg.DryRun, cfg.HashVerify),
-		verifier:        verify.New(cfg.HashVerify),
+		copier:          copier.New(copyWorkers, cfg.DryRun, cfg.HashVerify),
 		state:           st,
 		logger:          logger,
 		userDataManager: userDataManager,
 	}, nil
+}
+
+func effectiveCopyWorkers(configured int, conflictPolicy types.ConflictPolicy) int {
+	if conflictPolicy == types.ConflictPolicyOverwrite {
+		// Different path spellings can address the same file on case-insensitive
+		// or Unicode-normalizing filesystems. Preserve scan-order last-wins
+		// semantics by committing overwrite tasks in their planned order.
+		return 1
+	}
+	return configured
 }
 
 func (p *Pipeline) SetProgressCallback(cb ProgressCallback) {
@@ -123,6 +142,20 @@ func (p *Pipeline) RunWithContext(ctx context.Context) (*types.RunSummary, error
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	runLock, err := acquireRunLock(p.userDataManager.RunLockPath())
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrRunAlreadyActive, err)
+	}
+	defer runLock.Close()
+	// New may have loaded state before another process completed its run. Reload
+	// only after owning the process-wide lock so this run cannot overwrite a
+	// newer state snapshot with a stale in-memory map.
+	freshState, err := state.Load(p.cfg.StateFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to reload state after acquiring run lock: %w", err)
+	}
+	p.state = freshState
+	p.conflict.ResetReservations()
 
 	startTime := time.Now()
 	summary := &types.RunSummary{
@@ -140,9 +173,9 @@ func (p *Pipeline) RunWithContext(ctx context.Context) (*types.RunSummary, error
 
 	entries, err := p.scanner.ScanWithContext(ctx, p.cfg.Source)
 	if err != nil {
-		if errors.Is(err, context.Canceled) {
+		if cause := contextTermination(ctx, err); cause != nil {
 			summary.ScannedFiles = len(entries)
-			return p.finishCanceledRun(summary, 0)
+			return p.finishCanceledRun(summary, 0, cause)
 		}
 
 		// Save failure history for scan errors
@@ -179,14 +212,18 @@ func (p *Pipeline) RunWithContext(ctx context.Context) (*types.RunSummary, error
 	}
 
 	var tasks []types.CopyTask
+	taskIndexByDest := make(map[string]int)
+	overwriteSourcesByDest := make(map[string][]types.FileEntry)
+	overwriteDirtyCountByDest := make(map[string]int)
+	overwriteSequenceByDest := make(map[string]int)
 	var unclassifiedCount int
 	var filteredCount int
 
 	for i, entry := range entries {
-		if errors.Is(ctx.Err(), context.Canceled) {
+		if ctx.Err() != nil {
 			summary.TotalFiles = filteredCount
 			summary.Unclassified = unclassifiedCount
-			return p.finishCanceledRun(summary, 0)
+			return p.finishCanceledRun(summary, 0, ctx.Err())
 		}
 
 		if i%100 == 0 {
@@ -200,15 +237,16 @@ func (p *Pipeline) RunWithContext(ctx context.Context) (*types.RunSummary, error
 			}
 		}
 
-		if !p.cfg.IgnoreState && p.state.IsProcessed(entry.Path, entry.Size) {
+		stateProcessed := !p.cfg.IgnoreState && p.state.IsEntryProcessed(entry, p.cfg.HashVerify)
+		if stateProcessed && p.cfg.ConflictPolicy != types.ConflictPolicyOverwrite {
 			continue
 		}
 
 		meta, err := p.meta.ExtractWithContext(ctx, entry)
-		if errors.Is(err, context.Canceled) {
+		if cause := contextTermination(ctx, err); cause != nil {
 			summary.TotalFiles = filteredCount
 			summary.Unclassified = unclassifiedCount
-			return p.finishCanceledRun(summary, 0)
+			return p.finishCanceledRun(summary, 0, cause)
 		}
 
 		// Date filter check (EXIF preferred, file mod time fallback)
@@ -216,24 +254,35 @@ func (p *Pipeline) RunWithContext(ctx context.Context) (*types.RunSummary, error
 			continue
 		}
 
-		filteredCount++
 		task := p.planner.Plan(entry, meta)
+		task.ConflictPolicy = p.cfg.ConflictPolicy
+		task.QuarantineDir = filepath.Join(p.cfg.Dest, p.cfg.QuarantineDir)
+		task.DestinationRoot = p.cfg.Dest
+		needsProcessing := !stateProcessed
+		if p.cfg.ConflictPolicy == types.ConflictPolicyOverwrite && stateProcessed {
+			_, statErr := os.Stat(task.DestPath)
+			needsProcessing = statErr != nil
+		}
+		if needsProcessing {
+			filteredCount++
+		}
 
-		if meta.CaptureTime == nil {
+		if meta.CaptureTime == nil && needsProcessing {
 			unclassifiedCount++
 		}
 
 		// Skip duplicate check if IgnoreState is enabled
-		if !p.cfg.IgnoreState {
+		if !p.cfg.IgnoreState && p.cfg.ConflictPolicy != types.ConflictPolicyOverwrite {
 			isDup, err := p.dedup.IsDuplicateWithContext(ctx, entry, task.DestPath)
-			if errors.Is(err, context.Canceled) {
+			if cause := contextTermination(ctx, err); cause != nil {
 				summary.TotalFiles = filteredCount
 				summary.Unclassified = unclassifiedCount
-				return p.finishCanceledRun(summary, 0)
+				return p.finishCanceledRun(summary, 0, cause)
 			}
 			if err == nil && isDup {
 				task.Status = types.TaskStatusSkipped
 				task.Action = types.CopyActionSkipped
+				summary.Skipped++
 				continue
 			}
 		}
@@ -242,18 +291,38 @@ func (p *Pipeline) RunWithContext(ctx context.Context) (*types.RunSummary, error
 		if resolution.Skip {
 			task.Status = types.TaskStatusSkipped
 			task.Action = resolution.Action
+			summary.Skipped++
 			continue
 		}
 
 		task.DestPath = resolution.DestPath
 		task.Action = resolution.Action
+		if p.cfg.ConflictPolicy == types.ConflictPolicyOverwrite {
+			overwriteSourcesByDest[task.DestPath] = append(overwriteSourcesByDest[task.DestPath], entry)
+			overwriteSequenceByDest[task.DestPath] = i
+			if needsProcessing {
+				overwriteDirtyCountByDest[task.DestPath]++
+			}
+		}
+		if resolution.ReplaceReserved {
+			if index, ok := taskIndexByDest[task.DestPath]; ok {
+				tasks[index] = task
+				continue
+			}
+		}
+		taskIndexByDest[task.DestPath] = len(tasks)
 		tasks = append(tasks, task)
+	}
+	if p.cfg.ConflictPolicy == types.ConflictPolicyOverwrite {
+		tasks, overwriteSourcesByDest, overwriteDirtyCountByDest = selectDirtyOverwriteGroups(
+			ctx, tasks, overwriteSourcesByDest, overwriteDirtyCountByDest, overwriteSequenceByDest,
+		)
 	}
 
 	summary.TotalFiles = filteredCount
 	summary.Unclassified = unclassifiedCount
-	if errors.Is(ctx.Err(), context.Canceled) {
-		return p.finishCanceledRun(summary, 0)
+	if ctx.Err() != nil {
+		return p.finishCanceledRun(summary, 0, ctx.Err())
 	}
 
 	// Ensure 100% analysis progress is sent
@@ -287,9 +356,17 @@ func (p *Pipeline) RunWithContext(ctx context.Context) (*types.RunSummary, error
 
 	var bytesCopied int64
 	processed := 0
+	var cancellationCause error
+	overwriteWinnerByDest := make(map[string]verifiedCopyIdentity)
 
 	for result := range resultChan {
-		if errors.Is(result.Error, context.Canceled) {
+		cancelled, countFailure := classifyCopyResultError(result.Error)
+		if cancelled {
+			if cancellationCause == nil {
+				cancellationCause = contextTermination(nil, result.Error)
+			}
+		}
+		if cancelled && !countFailure {
 			continue
 		}
 
@@ -297,18 +374,38 @@ func (p *Pipeline) RunWithContext(ctx context.Context) (*types.RunSummary, error
 		p.logger.Progress(processed, len(tasks), result.Task.Source.Name)
 
 		if p.progressCallback != nil {
+			action := result.Task.Action
+			errorMessage := ""
+			if result.Error != nil {
+				action = types.CopyActionFailed
+				errorMessage = result.Error.Error()
+			}
 			p.progressCallback(ProgressUpdate{
 				Type:     "progress",
 				Current:  processed,
 				Total:    len(tasks),
 				Filename: result.Task.Source.Name,
-				Action:   result.Task.Action,
+				Action:   action,
+				Error:    errorMessage,
 			})
+		}
+
+		if result.Error != nil {
+			summary.Failed += overwriteDispositionCount(p.cfg.ConflictPolicy, overwriteDirtyCountByDest, result.Task.DestPath)
+			p.logger.LogTask(result.Task, 0)
+			continue
+		}
+		if p.cfg.ConflictPolicy == types.ConflictPolicyOverwrite {
+			overwriteWinnerByDest[result.Task.DestPath] = verifiedCopyIdentity{
+				sourcePath: result.Task.Source.Path,
+				hash:       append([]byte(nil), result.VerifiedSourceHash...),
+			}
 		}
 
 		switch result.Task.Action {
 		case types.CopyActionCopied:
 			summary.Copied++
+			summary.Overwritten += overwriteSupersededCount(p.cfg.ConflictPolicy, overwriteDirtyCountByDest, result.Task.DestPath)
 			bytesCopied += result.Task.Source.Size
 		case types.CopyActionSkipped:
 			summary.Skipped++
@@ -317,50 +414,256 @@ func (p *Pipeline) RunWithContext(ctx context.Context) (*types.RunSummary, error
 			bytesCopied += result.Task.Source.Size
 		case types.CopyActionOverwritten:
 			summary.Overwritten++
+			summary.Overwritten += overwriteSupersededCount(p.cfg.ConflictPolicy, overwriteDirtyCountByDest, result.Task.DestPath)
 			bytesCopied += result.Task.Source.Size
 		case types.CopyActionQuarantined:
 			summary.Quarantined++
 			bytesCopied += result.Task.Source.Size
 		}
 
-		if result.Error != nil {
-			summary.Failed++
-			p.logger.LogTask(result.Task, 0)
-		} else {
-			if !p.cfg.DryRun {
-				p.state.MarkProcessed(result.Task.Source.Path, result.Task.Source.Size, result.Task.DestPath)
+		if !p.cfg.DryRun && result.Task.Action != types.CopyActionSkipped && p.cfg.ConflictPolicy != types.ConflictPolicyOverwrite {
+			if err := p.markProcessed(result.Task.Source, result.Task.DestPath, result.VerifiedSourceHash, p.cfg.HashVerify, false); err != nil {
+				summary.Warnings = append(summary.Warnings, "파일 처리 상태를 기록하지 못했습니다: "+err.Error())
 			}
-			p.logger.LogTask(result.Task, 0)
 		}
+		p.logger.LogTask(result.Task, 0)
 	}
 
-	if errors.Is(ctx.Err(), context.Canceled) && processed < len(tasks) {
-		return p.finishCanceledRun(summary, bytesCopied)
+	if cancellationCause != nil || (ctx.Err() != nil && processed < len(tasks)) {
+		if cancellationCause == nil {
+			cancellationCause = ctx.Err()
+		}
+		return p.finishCanceledRun(summary, bytesCopied, cancellationCause)
+	}
+	if !p.cfg.DryRun && p.cfg.ConflictPolicy == types.ConflictPolicyOverwrite && summary.Failed == 0 {
+		// Overwrite replay establishes one ordered final state. Commit its source
+		// state only after every winner succeeds so cancellation/failure leaves a
+		// dirty source that forces the next run to converge again.
+		for destPath, sources := range overwriteSourcesByDest {
+			winner := overwriteWinnerByDest[destPath]
+			if p.cfg.HashVerify && (winner.sourcePath == "" || len(winner.hash) == 0) {
+				summary.Warnings = append(summary.Warnings, "덮어쓰기 결과의 검증 해시가 없어 처리 상태를 기록하지 않았습니다: "+destPath)
+				continue
+			}
+			for _, source := range sources {
+				requireVerifiedHash := p.cfg.HashVerify && source.Path == winner.sourcePath
+				superseded := source.Path != winner.sourcePath
+				if err := p.markProcessed(source, destPath, winner.hash, requireVerifiedHash, superseded); err != nil {
+					summary.Warnings = append(summary.Warnings, "파일 처리 상태를 기록하지 못했습니다: "+err.Error())
+				}
+			}
+		}
 	}
 
 	p.finalizeSummary(summary, bytesCopied)
 	status := types.BackupStatusSuccess
+	var runErr error
 	if summary.Failed > 0 {
 		status = types.BackupStatusFailed
+		runErr = fmt.Errorf("%w: %d file(s) failed", ErrRunFailed, summary.Failed)
 	}
 	p.persistRunResult(summary, status)
 
 	// Wait a bit to ensure previous progress messages are sent
 	time.Sleep(100 * time.Millisecond)
 
-	if p.progressCallback != nil {
+	if p.progressCallback != nil && runErr != nil {
+		p.progressCallback(ProgressUpdate{
+			Type:    "error",
+			Summary: summary,
+			Error:   runErr.Error(),
+		})
+	} else if p.progressCallback != nil {
 		p.progressCallback(ProgressUpdate{
 			Type:    "complete",
 			Summary: summary,
 		})
 	}
 
-	return summary, nil
+	return summary, runErr
 }
 
-func (p *Pipeline) finishCanceledRun(summary *types.RunSummary, bytesCopied int64) (*types.RunSummary, error) {
+type verifiedCopyIdentity struct {
+	sourcePath string
+	hash       []byte
+}
+
+func (p *Pipeline) markProcessed(source types.FileEntry, destPath string, verifiedHash []byte, requireVerifiedHash, superseded bool) error {
+	var err error
+	if requireVerifiedHash {
+		err = p.state.MarkProcessedEntryWithVerifiedHash(source, destPath, verifiedHash)
+	} else if superseded {
+		err = p.state.MarkSupersededEntry(source, destPath, p.cfg.HashVerify)
+	} else {
+		err = p.state.MarkProcessedEntry(source, destPath, p.cfg.HashVerify)
+	}
+	if err != nil {
+		p.logger.Error("Failed to record processed file", err)
+		return err
+	}
+	return nil
+}
+
+func overwriteDispositionCount(policy types.ConflictPolicy, dirtyCountByDest map[string]int, destPath string) int {
+	if policy == types.ConflictPolicyOverwrite && dirtyCountByDest[destPath] > 0 {
+		return dirtyCountByDest[destPath]
+	}
+	return 1
+}
+
+func overwriteSupersededCount(policy types.ConflictPolicy, dirtyCountByDest map[string]int, destPath string) int {
+	count := overwriteDispositionCount(policy, dirtyCountByDest, destPath)
+	if count > 1 {
+		return count - 1
+	}
+	return 0
+}
+
+type overwriteCandidate struct {
+	task     types.CopyTask
+	sequence int
+	identity string
+}
+
+type overwriteGroup struct {
+	candidates []overwriteCandidate
+}
+
+func selectDirtyOverwriteGroups(
+	ctx context.Context,
+	tasks []types.CopyTask,
+	sourcesByDest map[string][]types.FileEntry,
+	dirtyCountByDest map[string]int,
+	sequenceByDest map[string]int,
+) ([]types.CopyTask, map[string][]types.FileEntry, map[string]int) {
+	return selectDirtyOverwriteGroupsWithResolver(
+		ctx, tasks, sourcesByDest, dirtyCountByDest, sequenceByDest, newDestinationIdentityResolver(),
+	)
+}
+
+func selectDirtyOverwriteGroupsWithResolver(
+	ctx context.Context,
+	tasks []types.CopyTask,
+	sourcesByDest map[string][]types.FileEntry,
+	dirtyCountByDest map[string]int,
+	sequenceByDest map[string]int,
+	resolver *destinationIdentityResolver,
+) ([]types.CopyTask, map[string][]types.FileEntry, map[string]int) {
+	candidates := make([]overwriteCandidate, 0, len(tasks))
+	for _, task := range tasks {
+		if ctx.Err() != nil {
+			return nil, nil, nil
+		}
+		candidates = append(candidates, overwriteCandidate{
+			task: task, sequence: sequenceByDest[task.DestPath], identity: resolver.Identity(task.DestPath),
+		})
+	}
+	sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].sequence < candidates[j].sequence })
+
+	groups := make([]overwriteGroup, 0, len(candidates))
+	groupByIdentity := make(map[string]int, len(candidates))
+	groupByRawPath := make(map[string]int, len(candidates))
+	for _, candidate := range candidates {
+		if ctx.Err() != nil {
+			return nil, nil, nil
+		}
+		groupIndex, found := groupByRawPath[candidate.task.DestPath]
+		if !found && candidate.identity != "" {
+			groupIndex, found = groupByIdentity[candidate.identity]
+		}
+		if !found {
+			groupIndex = len(groups)
+			groups = append(groups, overwriteGroup{candidates: []overwriteCandidate{candidate}})
+		} else {
+			groups[groupIndex].candidates = append(groups[groupIndex].candidates, candidate)
+		}
+		groupByRawPath[candidate.task.DestPath] = groupIndex
+		if candidate.identity != "" {
+			groupByIdentity[candidate.identity] = groupIndex
+		}
+	}
+
+	selectedTasks := make([]types.CopyTask, 0, len(groups))
+	selectedSources := make(map[string][]types.FileEntry, len(groups))
+	selectedDirtyCounts := make(map[string]int, len(groups))
+	for _, group := range groups {
+		if ctx.Err() != nil {
+			return nil, nil, nil
+		}
+		dirtyCount := 0
+		var sources []types.FileEntry
+		for _, candidate := range group.candidates {
+			dirtyCount += dirtyCountByDest[candidate.task.DestPath]
+			sources = append(sources, sourcesByDest[candidate.task.DestPath]...)
+		}
+		if dirtyCount == 0 {
+			continue
+		}
+		winner := group.candidates[len(group.candidates)-1].task
+		selectedTasks = append(selectedTasks, winner)
+		selectedSources[winner.DestPath] = sources
+		selectedDirtyCounts[winner.DestPath] = dirtyCount
+	}
+	return selectedTasks, selectedSources, selectedDirtyCounts
+}
+
+func classifyCopyResultError(err error) (cancelled, countFailure bool) {
+	if err == nil {
+		return false, false
+	}
+	cancelled = isContextTermination(err)
+	if !cancelled {
+		return false, true
+	}
+	return true, !containsOnlyContextTermination(err)
+}
+
+func containsOnlyContextTermination(err error) bool {
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		children := joined.Unwrap()
+		if len(children) == 0 {
+			return isContextTermination(err)
+		}
+		for _, child := range children {
+			if !containsOnlyContextTermination(child) {
+				return false
+			}
+		}
+		return true
+	}
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
+		if child := wrapped.Unwrap(); child != nil {
+			return containsOnlyContextTermination(child)
+		}
+	}
+	return isContextTermination(err)
+}
+
+func isContextTermination(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+}
+
+func contextTermination(ctx context.Context, err error) error {
+	if ctx != nil && ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if errors.Is(err, context.Canceled) {
+		return context.Canceled
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return context.DeadlineExceeded
+	}
+	return nil
+}
+
+func (p *Pipeline) finishCanceledRun(summary *types.RunSummary, bytesCopied int64, causes ...error) (*types.RunSummary, error) {
 	p.finalizeSummary(summary, bytesCopied)
 	p.persistRunResult(summary, types.BackupStatusCanceled)
+	for _, cause := range causes {
+		if cause != nil {
+			return summary, errors.Join(ErrRunCanceled, cause)
+		}
+	}
 	return summary, ErrRunCanceled
 }
 
@@ -377,6 +680,7 @@ func (p *Pipeline) persistRunResult(summary *types.RunSummary, status types.Back
 	if !p.cfg.DryRun {
 		if err := p.state.Save(); err != nil {
 			p.logger.Error("Failed to save state", err)
+			summary.Warnings = append(summary.Warnings, "처리 상태를 저장하지 못했습니다: "+err.Error())
 		}
 	}
 
@@ -392,7 +696,7 @@ func (p *Pipeline) persistRunResult(summary *types.RunSummary, status types.Back
 
 	if err := p.userDataManager.AddHistoryEntry(historyEntry); err != nil {
 		p.logger.Error("Failed to save backup history", err)
-		// Don't fail the backup if history save fails
+		summary.Warnings = append(summary.Warnings, "백업 이력을 저장하지 못했습니다: "+err.Error())
 	}
 }
 

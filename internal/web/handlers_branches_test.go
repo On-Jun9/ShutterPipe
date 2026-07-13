@@ -61,8 +61,6 @@ func TestHandleBrowse_ReturnsInternalErrorOnInvalidPath(t *testing.T) {
 // TestHandleRun_BackgroundPipelineInitFailureBroadcastsError는 테스트 코드 동작을 검증하거나 보조합니다.
 func TestHandleRun_BackgroundPipelineInitFailureBroadcastsError(t *testing.T) {
 	// background goroutine에서 pipeline.New 실패 시 error progress를 broadcast 해야 한다.
-	waitForRunMutexFree(t)
-
 	tmpDir := t.TempDir()
 	homeFile := filepath.Join(tmpDir, "home-file")
 	if err := os.WriteFile(homeFile, []byte("x"), 0644); err != nil {
@@ -94,14 +92,12 @@ func TestHandleRun_BackgroundPipelineInitFailureBroadcastsError(t *testing.T) {
 
 	waitForErrorProgressMessage(t, s.hub.broadcast, 2*time.Second)
 
-	waitForRunMutexFree(t)
+	waitForRunManagerInactive(t, s)
 }
 
 // TestHandleRun_BackgroundPipelineRunFailureBroadcastsError는 테스트 코드 동작을 검증하거나 보조합니다.
 func TestHandleRun_BackgroundPipelineRunFailureBroadcastsError(t *testing.T) {
 	// pipeline.New 성공 후 Run 실패(스캔 실패)도 error progress를 broadcast 해야 한다.
-	waitForRunMutexFree(t)
-
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", filepath.Join(tmpDir, "home"))
 
@@ -126,7 +122,7 @@ func TestHandleRun_BackgroundPipelineRunFailureBroadcastsError(t *testing.T) {
 
 	waitForErrorProgressMessage(t, s.hub.broadcast, 2*time.Second)
 
-	waitForRunMutexFree(t)
+	waitForRunManagerInactive(t, s)
 }
 
 // TestBroadcastJSON_IgnoresMarshalError는 테스트 코드 동작을 검증하거나 보조합니다.

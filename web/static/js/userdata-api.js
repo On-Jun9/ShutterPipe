@@ -21,9 +21,30 @@ async function parseApiErrorResponse(response) {
 // Run API
 // =============================================================================
 
+let runApiTimeoutMs = 10000;
+
+async function fetchRunApi(url, options = {}) {
+    if (typeof AbortController === 'undefined' || typeof setTimeout === 'undefined') {
+        return fetch(url, options);
+    }
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), runApiTimeoutMs);
+    try {
+        return await fetch(url, { ...options, signal: controller.signal });
+    } catch (error) {
+        if (controller.signal.aborted) {
+            throw new Error(`요청 시간이 ${runApiTimeoutMs}ms를 초과했습니다.`);
+        }
+        throw error;
+    } finally {
+        clearTimeout(timeoutId);
+    }
+}
+
 async function startBackupRunOnServer(config) {
     try {
-        const response = await fetch('/api/run', {
+        const response = await fetchRunApi('/api/run', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(config)
@@ -39,17 +60,30 @@ async function startBackupRunOnServer(config) {
             };
         }
 
-        return { success: true, status: response.status };
+        const data = await response.json();
+        return {
+            success: true,
+            status: response.status,
+            runStatus: data.status,
+            runId: data.run_id,
+            serverId: data.server_id,
+            revision: data.revision
+        };
     } catch (error) {
         console.error('백업 시작 요청 실패:', error);
         return { success: false, error: error.message };
     }
 }
 
-async function cancelBackupRunOnServer() {
+async function cancelBackupRunOnServer(runId) {
+    if (!runId) {
+        return { success: false, status: 400, error: 'run_id is required' };
+    }
     try {
-        const response = await fetch('/api/run/cancel', {
-            method: 'POST'
+        const response = await fetchRunApi('/api/run/cancel', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ run_id: runId })
         });
 
         if (!response.ok) {
@@ -62,9 +96,47 @@ async function cancelBackupRunOnServer() {
             };
         }
 
-        return { success: true, status: response.status };
+        const data = await response.json();
+        return {
+            success: true,
+            status: response.status,
+            runStatus: data.status,
+            runId: data.run_id,
+            serverId: data.server_id,
+            revision: data.revision
+        };
     } catch (error) {
         console.error('백업 취소 요청 실패:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+async function getBackupRunStatusFromServer() {
+    try {
+        const response = await fetchRunApi('/api/run/status');
+        if (!response.ok) {
+            const parsedError = await parseApiErrorResponse(response);
+            return {
+                success: false,
+                status: response.status,
+                field: parsedError.field,
+                error: parsedError.error
+            };
+        }
+
+        const data = await response.json();
+        return {
+            success: true,
+            status: response.status,
+            runStatus: data.status,
+            runId: data.run_id || null,
+            serverId: data.server_id || null,
+            summary: data.summary,
+            error: data.error,
+            revision: data.revision
+        };
+    } catch (error) {
+        console.error('백업 상태 조회 실패:', error);
         return { success: false, error: error.message };
     }
 }

@@ -1,6 +1,8 @@
 package verify
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -166,5 +168,18 @@ func TestVerifierVerify_ReturnsDestinationHashError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "failed to hash destination") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestVerifierVerifyStagedWithContext_Cancelled(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "staged.bin")
+	if err := os.WriteFile(path, []byte("content"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := New(true).VerifyStagedWithContext(ctx, path, int64(len("content")), []byte("unused"))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context cancellation, got %v", err)
 	}
 }

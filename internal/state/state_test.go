@@ -1,9 +1,14 @@
 package state
 
 import (
+	"crypto/sha256"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/On-Jun9/ShutterPipe/pkg/types"
 )
 
 // TestLoad_ReturnsEmptyStateWhenFileMissing는 테스트 코드 동작을 검증하거나 보조합니다.
@@ -105,5 +110,176 @@ func TestStateSave_ReturnsErrorWhenParentIsFile(t *testing.T) {
 
 	if err := st.Save(); err == nil {
 		t.Fatal("expected save error")
+	}
+}
+
+func TestStateEntryIdentityDetectsSameSizeSourceAndDestinationChanges(t *testing.T) {
+	tmpDir := t.TempDir()
+	sourcePath := filepath.Join(tmpDir, "source.jpg")
+	destPath := filepath.Join(tmpDir, "dest.jpg")
+	if err := os.WriteFile(sourcePath, []byte("source"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(destPath, []byte("source"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	sourceInfo, err := os.Stat(sourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := types.FileEntry{Path: sourcePath, Size: sourceInfo.Size(), ModTime: sourceInfo.ModTime()}
+	st := New(filepath.Join(tmpDir, "state.json"))
+	if err := st.MarkProcessedEntry(entry, destPath, false); err != nil {
+		t.Fatal(err)
+	}
+	if !st.IsEntryProcessed(entry, false) {
+		t.Fatal("fresh source and destination were not recognized")
+	}
+
+	if err := os.WriteFile(sourcePath, []byte("change"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	future := sourceInfo.ModTime().Add(2 * time.Second)
+	if err := os.Chtimes(sourcePath, future, future); err != nil {
+		t.Fatal(err)
+	}
+	changedSource := entry
+	changedSource.ModTime = future
+	if st.IsEntryProcessed(changedSource, false) {
+		t.Fatal("same-size source modification remained processed")
+	}
+
+	if err := os.Chtimes(sourcePath, entry.ModTime, entry.ModTime); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(destPath, []byte("damage"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(destPath, future, future); err != nil {
+		t.Fatal(err)
+	}
+	if st.IsEntryProcessed(entry, false) {
+		t.Fatal("same-size destination modification remained processed")
+	}
+}
+
+func TestStateHashIdentityDetectsPreservedTimestampContentChange(t *testing.T) {
+	tmpDir := t.TempDir()
+	sourcePath := filepath.Join(tmpDir, "source.jpg")
+	destPath := filepath.Join(tmpDir, "dest.jpg")
+	if err := os.WriteFile(sourcePath, []byte("source"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(destPath, []byte("source"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	sourceInfo, err := os.Stat(sourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := types.FileEntry{Path: sourcePath, Size: sourceInfo.Size(), ModTime: sourceInfo.ModTime()}
+	st := New(filepath.Join(tmpDir, "state.json"))
+	if err := st.MarkProcessedEntry(entry, destPath, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sourcePath, []byte("change"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(sourcePath, entry.ModTime, entry.ModTime); err != nil {
+		t.Fatal(err)
+	}
+	if st.IsEntryProcessed(entry, true) {
+		t.Fatal("hash mode missed same-size source content change with preserved mtime")
+	}
+}
+
+func TestStateVerifiedHashRejectsSourceChangedBeforeCommitWithPreservedIdentity(t *testing.T) {
+	tmpDir := t.TempDir()
+	sourcePath := filepath.Join(tmpDir, "source.jpg")
+	destPath := filepath.Join(tmpDir, "dest.jpg")
+	original := []byte("AAAA")
+	if err := os.WriteFile(sourcePath, original, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(destPath, original, 0644); err != nil {
+		t.Fatal(err)
+	}
+	sourceInfo, err := os.Stat(sourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := types.FileEntry{Path: sourcePath, Size: sourceInfo.Size(), ModTime: sourceInfo.ModTime()}
+	verifiedHash := sha256.Sum256(original)
+
+	if err := os.WriteFile(sourcePath, []byte("BBBB"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(sourcePath, entry.ModTime, entry.ModTime); err != nil {
+		t.Fatal(err)
+	}
+
+	st := New(filepath.Join(tmpDir, "state.json"))
+	err = st.MarkProcessedEntryWithVerifiedHash(entry, destPath, verifiedHash[:])
+	if err == nil || !strings.Contains(err.Error(), "verified snapshot changed") {
+		t.Fatalf("expected verified snapshot mismatch, got %v", err)
+	}
+	if len(st.Processed) != 0 {
+		t.Fatalf("mismatched snapshot was recorded: %#v", st.Processed)
+	}
+}
+
+func TestStateHashCommitAllowsMismatchOnlyForExplicitOverwriteSupersession(t *testing.T) {
+	tmpDir := t.TempDir()
+	sourcePath := filepath.Join(tmpDir, "source.jpg")
+	destPath := filepath.Join(tmpDir, "dest.jpg")
+	if err := os.WriteFile(sourcePath, []byte("AAAA"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(destPath, []byte("BBBB"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	sourceInfo, err := os.Stat(sourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := types.FileEntry{Path: sourcePath, Size: sourceInfo.Size(), ModTime: sourceInfo.ModTime()}
+	st := New(filepath.Join(tmpDir, "state.json"))
+	if err := st.MarkProcessedEntry(entry, destPath, true); err == nil || !strings.Contains(err.Error(), "source and destination differ") {
+		t.Fatalf("ordinary hash state commit accepted different content: %v", err)
+	}
+	if err := st.MarkSupersededEntry(entry, destPath, true); err != nil {
+		t.Fatalf("explicit overwrite supersession was rejected: %v", err)
+	}
+	if record := st.Processed[sourcePath]; !record.Superseded {
+		t.Fatalf("supersession semantics were not persisted: %#v", record)
+	}
+}
+
+func TestStateLegacyRecordIsDirtyForIdentityMigration(t *testing.T) {
+	st := New(filepath.Join(t.TempDir(), "state.json"))
+	st.MarkProcessed("/src/legacy.jpg", 7, "/dest/legacy.jpg")
+	entry := types.FileEntry{Path: "/src/legacy.jpg", Size: 7, ModTime: time.Now()}
+	if st.IsEntryProcessed(entry, false) {
+		t.Fatal("legacy path-size record bypassed identity migration")
+	}
+}
+
+func TestStateSaveUsesAtomicTemporaryFile(t *testing.T) {
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "state.json")
+	st := New(filePath)
+	st.MarkProcessed("/src/a.jpg", 1, "/dest/a.jpg")
+	if err := st.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(filePath); err != nil {
+		t.Fatalf("atomic state was not readable: %v", err)
+	}
+	temps, err := filepath.Glob(filepath.Join(dir, ".state.json.*.tmp"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(temps) != 0 {
+		t.Fatalf("temporary state files were left behind: %v", temps)
 	}
 }

@@ -1,15 +1,16 @@
 package web
 
 import (
-	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
-	"sync"
 
 	"github.com/On-Jun9/ShutterPipe/internal/config"
 	"github.com/On-Jun9/ShutterPipe/internal/pipeline"
@@ -114,43 +115,41 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
-var runMutex sync.Mutex
-var runCancelMu sync.Mutex
-var activeRunCancel context.CancelFunc
-
-func setActiveRunCancel(cancel context.CancelFunc) {
-	runCancelMu.Lock()
-	activeRunCancel = cancel
-	runCancelMu.Unlock()
+type RunRequest struct {
+	config.Config
+	RunID string `json:"run_id,omitempty"`
 }
 
-func clearActiveRunCancel() {
-	runCancelMu.Lock()
-	activeRunCancel = nil
-	runCancelMu.Unlock()
+type CancelRunRequest struct {
+	RunID string `json:"run_id,omitempty"`
 }
 
-func getActiveRunCancel() context.CancelFunc {
-	runCancelMu.Lock()
-	defer runCancelMu.Unlock()
-	return activeRunCancel
+func newRunID() (string, error) {
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		return "", fmt.Errorf("failed to generate run ID: %w", err)
+	}
+	return hex.EncodeToString(buf), nil
 }
 
 func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
-	if !runMutex.TryLock() {
+	if s.isShuttingDown() {
+		writeAPIError(w, http.StatusServiceUnavailable, "server is shutting down")
+		return
+	}
+	if s.runs().IsActive() {
 		writeAPIError(w, http.StatusConflict, "backup already running")
 		return
 	}
 
-	var cfg config.Config
-	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
-		runMutex.Unlock()
+	var req RunRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeAPIError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
+	cfg := req.Config
 	if err := cfg.Validate(); err != nil {
-		runMutex.Unlock()
 		var validationErr *config.ValidationError
 		if errors.As(err, &validationErr) {
 			writeValidationError(w, validationErr.Field, validationErr.Message)
@@ -160,76 +159,197 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if r.Context().Err() != nil {
+		return
+	}
 
-	runCtx, cancelRun := context.WithCancel(context.Background())
-	setActiveRunCancel(cancelRun)
+	runID := req.RunID
+	if runID == "" {
+		var err error
+		runID, err = newRunID()
+		if err != nil {
+			writeAPIError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
+	if len(runID) > 128 {
+		writeAPIError(w, http.StatusBadRequest, "run_id is too long")
+		return
+	}
+
+	runCtx, cancelRun, err := s.startRun(runID)
+	if errors.Is(err, http.ErrServerClosed) {
+		writeAPIError(w, http.StatusServiceUnavailable, "server is shutting down")
+		return
+	}
+	if err != nil {
+		writeAPIError(w, http.StatusConflict, err.Error())
+		return
+	}
+	if r.Context().Err() != nil {
+		cancelRun()
+		s.finishRun(pipeline.ProgressUpdate{
+			Type:    "cancelled",
+			RunID:   runID,
+			Message: "start request was cancelled before execution",
+		})
+		return
+	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "started"})
+	json.NewEncoder(w).Encode(map[string]string{"status": "started", "run_id": runID, "server_id": s.instanceID()})
 
 	go func() {
-		defer runMutex.Unlock()
-		defer clearActiveRunCancel()
 		defer cancelRun()
+		var terminalUpdate pipeline.ProgressUpdate
+		terminalPending := false
 		defer func() {
-			if r := recover(); r != nil {
-				fmt.Printf("PANIC RECOVERED: %v\n", r)
-				s.broadcastProgress(pipeline.ProgressUpdate{Type: "error", Error: fmt.Sprintf("Internal Server Error: %v", r)})
+			if recovered := recover(); recovered != nil {
+				fmt.Printf("PANIC RECOVERED: %v\n", recovered)
+				terminalUpdate = pipeline.ProgressUpdate{Type: "error", RunID: runID, Error: fmt.Sprintf("Internal Server Error: %v", recovered)}
+				terminalPending = true
 			}
+			if !terminalPending {
+				terminalUpdate = pipeline.ProgressUpdate{Type: "error", RunID: runID, Error: "backup ended without a terminal result"}
+			}
+			s.finishRun(terminalUpdate)
 		}()
 
 		p, err := pipeline.New(&cfg)
 		if err != nil {
-			s.broadcastProgress(pipeline.ProgressUpdate{Type: "error", Error: err.Error()})
+			terminalUpdate = pipeline.ProgressUpdate{Type: "error", RunID: runID, Error: err.Error()}
+			terminalPending = true
 			return
 		}
 
-		defer p.Close()
+		defer func() {
+			if closeErr := p.Close(); closeErr != nil {
+				// The backup outcome and history have already been finalized. Logger
+				// close failure is a cleanup warning, not a contradictory run result.
+				fmt.Printf("WARNING: failed to close backup logger for run %s: %v\n", runID, closeErr)
+			}
+		}()
 
 		p.SetProgressCallback(func(update pipeline.ProgressUpdate) {
-			s.broadcastProgress(update)
+			update.RunID = runID
+			if isTerminalProgressType(update.Type) {
+				terminalUpdate = update
+				terminalPending = true
+				return
+			}
+			s.broadcastActiveRunProgress(update)
 		})
 
 		summary, err := p.RunWithContext(runCtx)
 		if err != nil {
 			if errors.Is(err, pipeline.ErrRunCanceled) {
-				s.broadcastProgress(pipeline.ProgressUpdate{
+				terminalUpdate = pipeline.ProgressUpdate{
 					Type:    "cancelled",
+					RunID:   runID,
 					Message: "백업이 취소되었습니다.",
 					Summary: summary,
-				})
+				}
+				terminalPending = true
 				return
 			}
 
-			s.broadcastProgress(pipeline.ProgressUpdate{Type: "error", Error: err.Error()})
+			terminalUpdate = pipeline.ProgressUpdate{Type: "error", RunID: runID, Summary: summary, Error: err.Error()}
+			terminalPending = true
 			return
+		}
+
+		// Pipeline implementations normally emit complete through the callback.
+		// Keep this fallback so every successful goroutine exit records a terminal snapshot.
+		if !terminalPending {
+			terminalUpdate = pipeline.ProgressUpdate{Type: "complete", RunID: runID, Summary: summary}
+			terminalPending = true
 		}
 	}()
 }
 
 func (s *Server) handleCancelRun(w http.ResponseWriter, r *http.Request) {
-	cancelRun := getActiveRunCancel()
-	if cancelRun == nil {
-		writeAPIError(w, http.StatusConflict, "backup is not running")
+	var req CancelRunRequest
+	if r.Body != nil {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			writeAPIError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	if req.RunID == "" {
+		writeAPIError(w, http.StatusBadRequest, ErrRunIDRequired.Error())
 		return
 	}
 
-	cancelRun()
+	status, err := s.runs().Cancel(req.RunID)
+	if err != nil {
+		writeAPIError(w, http.StatusConflict, err.Error())
+		return
+	}
+	status.ServerID = s.instanceID()
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "cancelling"})
+	json.NewEncoder(w).Encode(status)
+}
+
+func (s *Server) handleRunStatus(w http.ResponseWriter, r *http.Request) {
+	status := s.runs().Status()
+	status.ServerID = s.instanceID()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(status)
 }
 
 func (s *Server) broadcastJSON(v interface{}) {
+	if s.hub == nil {
+		return
+	}
 	data, err := json.Marshal(v)
 	if err != nil {
 		return
 	}
-	s.hub.broadcast <- data
+	select {
+	case s.hub.broadcast <- data:
+	case <-s.hub.stop:
+	}
 }
 
 func (s *Server) broadcastProgress(update pipeline.ProgressUpdate) {
 	s.broadcastJSON(update)
+}
+
+func (s *Server) broadcastActiveRunProgress(update pipeline.ProgressUpdate) {
+	status := s.runs().Status()
+	if status.RunID != update.RunID || (status.Status != RunStatusRunning && status.Status != RunStatusCancelling) {
+		return
+	}
+	update.Revision = status.Revision
+	update.ServerID = s.instanceID()
+	s.broadcastProgress(update)
+}
+
+func (s *Server) finishRun(update pipeline.ProgressUpdate) {
+	status := terminalStatusForProgress(update.Type)
+	snapshot, finished := s.runs().Finish(update.RunID, status, update.Summary, update.Error)
+	if !finished {
+		return
+	}
+	update.Revision = snapshot.Revision
+	update.ServerID = s.instanceID()
+	s.broadcastProgress(update)
+}
+
+func isTerminalProgressType(progressType string) bool {
+	return progressType == "complete" || progressType == "cancelled" || progressType == "error"
+}
+
+func terminalStatusForProgress(progressType string) RunStatus {
+	switch progressType {
+	case "complete":
+		return RunStatusComplete
+	case "cancelled":
+		return RunStatusCancelled
+	default:
+		return RunStatusError
+	}
 }
 
 // Preset-related handlers

@@ -29,11 +29,22 @@ for pid in $TARGET_PIDS; do
     kill "$pid"
 done
 
-sleep 1
+for _ in $(seq 1 100); do
+    STILL_RUNNING=""
+    for pid in $TARGET_PIDS; do
+        if ps -p "$pid" > /dev/null 2>&1; then
+            STILL_RUNNING="$STILL_RUNNING $pid"
+        fi
+    done
+    if [ -z "$STILL_RUNNING" ]; then
+        break
+    fi
+    sleep 0.1
+done
 
 for pid in $TARGET_PIDS; do
     if ps -p "$pid" > /dev/null 2>&1; then
-        echo "[WARN] 정상 종료 실패, 강제 종료 중... (PID: $pid)"
+        echo "[WARN] 10초 내 정상 종료 실패, 강제 종료 중... (PID: $pid)"
         kill -9 "$pid"
     fi
 done

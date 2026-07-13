@@ -2,6 +2,7 @@ package web
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -87,8 +88,9 @@ func TestHandleRun_ReturnsValidationErrorForInvalidConfig(t *testing.T) {
 func TestHandleRun_ReturnsConflictWhenAlreadyRunning(t *testing.T) {
 	// 중복 실행 시 409 JSON 에러를 반환해야 한다.
 	s := &Server{}
-	runMutex.Lock()
-	defer runMutex.Unlock()
+	if !s.runs().Start("existing-run", func() {}) {
+		t.Fatal("failed to arrange active run")
+	}
 
 	req := httptest.NewRequest(http.MethodPost, "/api/run", strings.NewReader(`{}`))
 	rr := httptest.NewRecorder()
@@ -104,13 +106,70 @@ func TestHandleRun_ReturnsConflictWhenAlreadyRunning(t *testing.T) {
 	}
 }
 
+func TestHandleRun_RejectsReusedRunID(t *testing.T) {
+	s := &Server{}
+	if !s.runs().Start("reused-run", func() {}) {
+		t.Fatal("failed to arrange first run")
+	}
+	if _, finished := s.runs().Finish("reused-run", RunStatusComplete, nil, ""); !finished {
+		t.Fatal("failed to finish first run")
+	}
+	tmpDir := t.TempDir()
+	source := filepath.Join(tmpDir, "source")
+	dest := filepath.Join(tmpDir, "dest")
+	if err := os.MkdirAll(source, 0755); err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(map[string]any{"run_id": "reused-run", "source": source, "dest": dest})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/run", bytes.NewReader(body))
+	rr := httptest.NewRecorder()
+
+	s.handleRun(rr, req)
+
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("expected status 409, got %d", rr.Code)
+	}
+	if message := decodeAPIErrorResponse(t, rr).Message; message != ErrRunIDReused.Error() {
+		t.Fatalf("unexpected reused-ID message: %s", message)
+	}
+}
+
+func TestHandleRun_DoesNotAdmitCanceledRequest(t *testing.T) {
+	s := &Server{}
+	tmpDir := t.TempDir()
+	source := filepath.Join(tmpDir, "source")
+	dest := filepath.Join(tmpDir, "dest")
+	if err := os.MkdirAll(source, 0755); err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(map[string]any{"run_id": "cancelled-request", "source": source, "dest": dest})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	req := httptest.NewRequest(http.MethodPost, "/api/run", bytes.NewReader(body)).WithContext(ctx)
+	rr := httptest.NewRecorder()
+
+	s.handleRun(rr, req)
+
+	if s.runs().IsActive() {
+		t.Fatal("canceled HTTP request admitted a hidden backup run")
+	}
+	if status := s.runs().Status(); status.Status != RunStatusIdle {
+		t.Fatalf("canceled request changed run state: %+v", status)
+	}
+}
+
 // TestHandleCancelRun_ReturnsConflictWhenNotRunning는 테스트 코드 동작을 검증하거나 보조합니다.
 func TestHandleCancelRun_ReturnsConflictWhenNotRunning(t *testing.T) {
 	// 실행 중인 백업이 없으면 취소 요청은 409 JSON 에러를 반환해야 한다.
 	s := &Server{}
-	clearActiveRunCancel()
 
-	req := httptest.NewRequest(http.MethodPost, "/api/run/cancel", nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/run/cancel", strings.NewReader(`{"run_id":"run-1"}`))
 	rr := httptest.NewRecorder()
 	s.handleCancelRun(rr, req)
 
@@ -127,12 +186,11 @@ func TestHandleCancelRun_RequestsCancellationWhenRunning(t *testing.T) {
 	// 실행 중인 백업이 있으면 취소 함수를 호출하고 200을 반환해야 한다.
 	s := &Server{}
 	called := false
-	setActiveRunCancel(func() {
+	s.runs().Start("run-1", func() {
 		called = true
 	})
-	t.Cleanup(clearActiveRunCancel)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/run/cancel", nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/run/cancel", strings.NewReader(`{"run_id":"run-1"}`))
 	rr := httptest.NewRecorder()
 	s.handleCancelRun(rr, req)
 
@@ -143,12 +201,109 @@ func TestHandleCancelRun_RequestsCancellationWhenRunning(t *testing.T) {
 		t.Fatal("expected cancel function to be called")
 	}
 
-	var body map[string]string
+	var body RunStatusResponse
 	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
 	}
-	if body["status"] != "cancelling" {
+	if body.Status != RunStatusCancelling {
 		t.Fatalf("unexpected response body: %+v", body)
+	}
+	if body.RunID != "run-1" {
+		t.Fatalf("expected run ID in response, got %+v", body)
+	}
+}
+
+func TestHandleCancelRun_RejectsDifferentRunID(t *testing.T) {
+	s := &Server{}
+	cancelled := false
+	s.runs().Start("current-run", func() { cancelled = true })
+
+	req := httptest.NewRequest(http.MethodPost, "/api/run/cancel", strings.NewReader(`{"run_id":"stale-run"}`))
+	rr := httptest.NewRecorder()
+	s.handleCancelRun(rr, req)
+
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("expected status 409, got %d", rr.Code)
+	}
+	if cancelled {
+		t.Fatal("mismatched run ID cancelled the active run")
+	}
+	if status := s.runs().Status(); status.Status != RunStatusRunning || status.RunID != "current-run" {
+		t.Fatalf("active run changed unexpectedly: %+v", status)
+	}
+}
+
+func TestHandleCancelRun_RejectsMissingRunIDWhileRunning(t *testing.T) {
+	s := &Server{}
+	cancelled := false
+	s.runs().Start("current-run", func() { cancelled = true })
+
+	req := httptest.NewRequest(http.MethodPost, "/api/run/cancel", nil)
+	rr := httptest.NewRecorder()
+	s.handleCancelRun(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d", rr.Code)
+	}
+	if cancelled {
+		t.Fatal("missing run ID cancelled the active run")
+	}
+	if message := decodeAPIErrorResponse(t, rr).Message; message != "run_id is required" {
+		t.Fatalf("unexpected missing-ID error: %s", message)
+	}
+	if status := s.runs().Status(); status.Status != RunStatusRunning || status.RunID != "current-run" {
+		t.Fatalf("missing-ID request changed active run: %+v", status)
+	}
+}
+
+func TestHandleRunStatus_ReturnsActiveRun(t *testing.T) {
+	s := &Server{}
+	s.runs().Start("run-status", func() {})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/run/status", nil)
+	rr := httptest.NewRecorder()
+	s.handleRunStatus(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rr.Code)
+	}
+	var response RunStatusResponse
+	if err := json.NewDecoder(rr.Body).Decode(&response); err != nil {
+		t.Fatalf("failed to decode run status: %v", err)
+	}
+	if response.Status != RunStatusRunning || response.RunID != "run-status" {
+		t.Fatalf("unexpected run status: %+v", response)
+	}
+	if response.ServerID == "" {
+		t.Fatal("expected server instance ID in run status")
+	}
+}
+
+func TestHandleRunStatus_RetainsTerminalRunResult(t *testing.T) {
+	s := &Server{}
+	s.runs().Start("finished-run", func() {})
+	summary := &types.RunSummary{Copied: 3, Failed: 1}
+	terminal, finished := s.runs().Finish("finished-run", RunStatusError, summary, "copy failed")
+	if !finished {
+		t.Fatal("failed to arrange terminal run")
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/run/status", nil)
+	rr := httptest.NewRecorder()
+	s.handleRunStatus(rr, req)
+
+	var response RunStatusResponse
+	if err := json.NewDecoder(rr.Body).Decode(&response); err != nil {
+		t.Fatalf("failed to decode run status: %v", err)
+	}
+	if response.Status != RunStatusError || response.RunID != "finished-run" || response.Error != "copy failed" {
+		t.Fatalf("terminal result was not retained: %+v", response)
+	}
+	if response.Summary == nil || response.Summary.Copied != 3 || response.Summary.Failed != 1 {
+		t.Fatalf("terminal summary was not retained: %+v", response.Summary)
+	}
+	if response.Revision != terminal.Revision {
+		t.Fatalf("expected terminal revision %d, got %d", terminal.Revision, response.Revision)
 	}
 }
 
@@ -197,26 +352,21 @@ func TestHandleRun_AfterCancelMutexReleasedForNewRun(t *testing.T) {
 	}
 
 	// 취소 요청
-	reqC := httptest.NewRequest(http.MethodPost, "/api/run/cancel", nil)
+	var started struct {
+		RunID string `json:"run_id"`
+	}
+	if err := json.Unmarshal(rr1.Body.Bytes(), &started); err != nil {
+		t.Fatalf("failed to decode first run response: %v", err)
+	}
+	reqC := httptest.NewRequest(http.MethodPost, "/api/run/cancel", strings.NewReader(`{"run_id":"`+started.RunID+`"}`))
 	rrC := httptest.NewRecorder()
 	s.handleCancelRun(rrC, reqC)
 	if rrC.Code != http.StatusOK {
 		t.Fatalf("expected 200 for cancel, got %d", rrC.Code)
 	}
 
-	// 고루틴이 종료되어 runMutex가 해제될 때까지 대기
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if runMutex.TryLock() {
-			runMutex.Unlock()
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if !runMutex.TryLock() {
-		t.Fatal("runMutex still locked after cancel: goroutine did not release it in time")
-	}
-	runMutex.Unlock()
+	// 고루틴이 종료되어 실행 관리자가 terminal 상태를 기록할 때까지 대기
+	waitForRunManagerInactive(t, s)
 
 	// 두 번째 실행이 409 없이 시작되어야 한다
 	body2, _ := json.Marshal(cfg)
@@ -229,19 +379,24 @@ func TestHandleRun_AfterCancelMutexReleasedForNewRun(t *testing.T) {
 
 	// 두 번째 고루틴 정리
 	t.Cleanup(func() {
-		if fn := getActiveRunCancel(); fn != nil {
-			fn()
+		status := s.runs().Status()
+		if s.runs().IsActive() {
+			_, _ = s.runs().Cancel(status.RunID)
 		}
-		cleanupDeadline := time.Now().Add(3 * time.Second)
-		for time.Now().Before(cleanupDeadline) {
-			if runMutex.TryLock() {
-				runMutex.Unlock()
-				break
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
-		clearActiveRunCancel()
+		waitForRunManagerInactive(t, s)
 	})
+}
+
+func waitForRunManagerInactive(t *testing.T, s *Server) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if !s.runs().IsActive() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("timeout waiting for run manager to become inactive")
 }
 
 // TestHandleBrowse_ReturnsNotFoundForMissingPath는 테스트 코드 동작을 검증하거나 보조합니다.

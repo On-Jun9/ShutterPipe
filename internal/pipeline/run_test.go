@@ -2,7 +2,9 @@ package pipeline
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +12,7 @@ import (
 	"time"
 
 	"github.com/On-Jun9/ShutterPipe/internal/config"
+	"github.com/On-Jun9/ShutterPipe/internal/copier"
 	"github.com/On-Jun9/ShutterPipe/internal/state"
 	"github.com/On-Jun9/ShutterPipe/pkg/types"
 )
@@ -28,6 +31,196 @@ func newTestConfig(baseDir, sourceDir, destDir string) *config.Config {
 		QuarantineDir:     "quarantine",
 		StateFile:         filepath.Join(baseDir, "state", "state.json"),
 		LogFile:           filepath.Join(baseDir, "logs", "shutterpipe.log"),
+	}
+}
+
+type truncatingMetadataExtractor struct {
+	size int64
+}
+
+func (e truncatingMetadataExtractor) ExtractWithContext(_ context.Context, entry types.FileEntry) (types.MediaMetadata, error) {
+	return types.MediaMetadata{}, os.Truncate(entry.Path, e.size)
+}
+
+func TestEffectiveCopyWorkers_OverwriteSerializesFilesystemEquivalentPaths(t *testing.T) {
+	if got := effectiveCopyWorkers(8, types.ConflictPolicyOverwrite); got != 1 {
+		t.Fatalf("overwrite commits must preserve planned order, got %d workers", got)
+	}
+	if got := effectiveCopyWorkers(8, types.ConflictPolicyRename); got != 8 {
+		t.Fatalf("non-overwrite policy unexpectedly lost concurrency: got %d workers", got)
+	}
+}
+
+func TestSelectDirtyOverwriteGroups_DoesNotCollapseDistinctHardLinks(t *testing.T) {
+	dir := t.TempDir()
+	firstDest := filepath.Join(dir, "first.jpg")
+	secondDest := filepath.Join(dir, "second.jpg")
+	if err := os.WriteFile(firstDest, []byte("shared"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(firstDest, secondDest); err != nil {
+		t.Skipf("hard links unavailable: %v", err)
+	}
+	firstSource := types.FileEntry{Path: "/source/first.jpg", Name: "first.jpg", Size: 6}
+	secondSource := types.FileEntry{Path: "/source/second.jpg", Name: "second.jpg", Size: 6}
+	tasks := []types.CopyTask{
+		{Source: firstSource, DestPath: firstDest},
+		{Source: secondSource, DestPath: secondDest},
+	}
+	selected, _, dirty := selectDirtyOverwriteGroups(
+		context.Background(),
+		tasks,
+		map[string][]types.FileEntry{firstDest: {firstSource}, secondDest: {secondSource}},
+		map[string]int{firstDest: 1},
+		map[string]int{firstDest: 0, secondDest: 1},
+	)
+	if len(selected) != 1 || selected[0].DestPath != firstDest || dirty[firstDest] != 1 {
+		t.Fatalf("distinct hard-link destinations were collapsed: selected=%+v dirty=%+v", selected, dirty)
+	}
+}
+
+func TestSelectDirtyOverwriteGroups_DoesNotCollapseSymlinkWithTargetEntry(t *testing.T) {
+	dir := t.TempDir()
+	targetDest := filepath.Join(dir, "target.jpg")
+	symlinkDest := filepath.Join(dir, "symlink.jpg")
+	if err := os.WriteFile(targetDest, []byte("target"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Base(targetDest), symlinkDest); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	targetSource := types.FileEntry{Path: "/source/target.jpg", Name: "target.jpg", Size: 6}
+	symlinkSource := types.FileEntry{Path: "/source/symlink.jpg", Name: "symlink.jpg", Size: 7}
+	selected, _, dirty := selectDirtyOverwriteGroups(
+		context.Background(),
+		[]types.CopyTask{
+			{Source: targetSource, DestPath: targetDest},
+			{Source: symlinkSource, DestPath: symlinkDest},
+		},
+		map[string][]types.FileEntry{targetDest: {targetSource}, symlinkDest: {symlinkSource}},
+		map[string]int{targetDest: 1, symlinkDest: 1},
+		map[string]int{targetDest: 0, symlinkDest: 1},
+	)
+	if len(selected) != 2 || dirty[targetDest] != 1 || dirty[symlinkDest] != 1 {
+		t.Fatalf("symlink entry was collapsed with its target: selected=%+v dirty=%+v", selected, dirty)
+	}
+}
+
+func TestSelectDirtyOverwriteGroups_UnicodeAliasWithHardLinkKeepsLastAliasWinner(t *testing.T) {
+	dir := t.TempDir()
+	composedDest := filepath.Join(dir, "caf\u00e9.jpg")
+	decomposedDest := filepath.Join(dir, "cafe\u0301.jpg")
+	hardLinkDest := filepath.Join(dir, "separate-hard-link.jpg")
+	if err := os.WriteFile(composedDest, []byte("shared"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(decomposedDest); err != nil {
+		t.Skip("destination filesystem does not normalize Unicode path names")
+	}
+	if err := os.Link(composedDest, hardLinkDest); err != nil {
+		t.Skipf("hard links unavailable: %v", err)
+	}
+
+	firstSource := types.FileEntry{Path: "/source/first.jpg", Name: "first.jpg", Size: 6}
+	winnerSource := types.FileEntry{Path: "/source/winner.jpg", Name: "winner.jpg", Size: 6}
+	hardLinkSource := types.FileEntry{Path: "/source/hard-link.jpg", Name: "hard-link.jpg", Size: 6}
+	tasks := []types.CopyTask{
+		{Source: firstSource, DestPath: composedDest},
+		{Source: winnerSource, DestPath: decomposedDest},
+		{Source: hardLinkSource, DestPath: hardLinkDest},
+	}
+	selected, _, dirty := selectDirtyOverwriteGroups(
+		context.Background(),
+		tasks,
+		map[string][]types.FileEntry{
+			composedDest:   {firstSource},
+			decomposedDest: {winnerSource},
+			hardLinkDest:   {hardLinkSource},
+		},
+		map[string]int{composedDest: 1, hardLinkDest: 1},
+		map[string]int{composedDest: 0, decomposedDest: 1, hardLinkDest: 2},
+	)
+	if len(selected) != 2 {
+		t.Fatalf("expected one alias winner plus distinct hard link, got %+v", selected)
+	}
+	if selected[0].DestPath != decomposedDest || dirty[decomposedDest] != 1 {
+		t.Fatalf("Unicode aliases did not select their last planned winner: selected=%+v dirty=%+v", selected, dirty)
+	}
+	if selected[1].DestPath != hardLinkDest || dirty[hardLinkDest] != 1 {
+		t.Fatalf("distinct hard link was collapsed into Unicode alias group: selected=%+v dirty=%+v", selected, dirty)
+	}
+}
+
+func TestSelectDirtyOverwriteGroups_PreCanceledContextStopsSelection(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	selected, sources, dirty := selectDirtyOverwriteGroups(
+		ctx,
+		[]types.CopyTask{{DestPath: "/dest/photo.jpg"}},
+		nil,
+		map[string]int{"/dest/photo.jpg": 1},
+		map[string]int{"/dest/photo.jpg": 0},
+	)
+	if selected != nil || sources != nil || dirty != nil {
+		t.Fatalf("canceled selection returned work: selected=%+v sources=%+v dirty=%+v", selected, sources, dirty)
+	}
+}
+
+func TestSelectDirtyOverwriteGroups_UsesFilesystemCanonicalEntryForCaseAlias(t *testing.T) {
+	upperDest := filepath.FromSlash("/dest/Photo.jpg")
+	lowerDest := filepath.FromSlash("/dest/photo.jpg")
+	canonicalDest := filepath.FromSlash("/dest/PHOTO.jpg")
+	firstSource := types.FileEntry{Path: "/source/first.jpg", Name: "first.jpg"}
+	winnerSource := types.FileEntry{Path: "/source/winner.jpg", Name: "winner.jpg"}
+	lookups := 0
+	resolver := newDestinationIdentityResolver()
+	resolver.canonical = func(path string) (string, bool) {
+		lookups++
+		if path == upperDest || path == lowerDest {
+			return canonicalDest, true
+		}
+		return path, true
+	}
+
+	selected, _, dirty := selectDirtyOverwriteGroupsWithResolver(
+		context.Background(),
+		[]types.CopyTask{
+			{Source: firstSource, DestPath: upperDest},
+			{Source: winnerSource, DestPath: lowerDest},
+		},
+		map[string][]types.FileEntry{upperDest: {firstSource}, lowerDest: {winnerSource}},
+		map[string]int{upperDest: 1},
+		map[string]int{upperDest: 0, lowerDest: 1},
+		resolver,
+	)
+	if lookups != 2 {
+		t.Fatalf("canonical resolver called %d times, want once per unique path", lookups)
+	}
+	if len(selected) != 1 || selected[0].DestPath != lowerDest || dirty[lowerDest] != 1 {
+		t.Fatalf("case aliases did not replay the clean last winner: selected=%+v dirty=%+v", selected, dirty)
+	}
+}
+
+func BenchmarkSelectDirtyOverwriteGroups_SingleDirectory(b *testing.B) {
+	const taskCount = 10_000
+	tasks := make([]types.CopyTask, 0, taskCount)
+	sources := make(map[string][]types.FileEntry, taskCount)
+	dirty := make(map[string]int, taskCount)
+	sequences := make(map[string]int, taskCount)
+	for index := 0; index < taskCount; index++ {
+		destPath := filepath.Join("/missing-destination", "photos", fmt.Sprintf("%06d.jpg", index))
+		source := types.FileEntry{Path: fmt.Sprintf("/source/%06d.jpg", index)}
+		tasks = append(tasks, types.CopyTask{Source: source, DestPath: destPath})
+		sources[destPath] = []types.FileEntry{source}
+		dirty[destPath] = 1
+		sequences[destPath] = index
+	}
+	b.ResetTimer()
+	for index := 0; index < b.N; index++ {
+		selected, _, _ := selectDirtyOverwriteGroups(context.Background(), tasks, sources, dirty, sequences)
+		if len(selected) != taskCount {
+			b.Fatalf("selected %d tasks, want %d", len(selected), taskCount)
+		}
 	}
 }
 
@@ -313,14 +506,32 @@ func TestPipelineRun_NoTasksPathWhenFileAlreadyProcessed(t *testing.T) {
 	}
 
 	srcPath := filepath.Join(sourceDir, "photo.jpg")
+	destPath := filepath.Join(destDir, "unclassified", "photo.jpg")
 	content := []byte("photo-bytes")
 	if err := os.WriteFile(srcPath, content, 0644); err != nil {
 		t.Fatalf("failed to write source file: %v", err)
 	}
+	if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
+		t.Fatalf("failed to create destination parent: %v", err)
+	}
+	if err := os.WriteFile(destPath, content, 0644); err != nil {
+		t.Fatalf("failed to write destination file: %v", err)
+	}
+	srcInfo, err := os.Stat(srcPath)
+	if err != nil {
+		t.Fatalf("failed to stat source file: %v", err)
+	}
 
 	cfg := newTestConfig(tmpDir, sourceDir, destDir)
 	st := state.New(cfg.StateFile)
-	st.MarkProcessed(srcPath, int64(len(content)), filepath.Join(destDir, "unclassified", "photo.jpg"))
+	if err := st.MarkProcessedEntry(types.FileEntry{
+		Path:    srcPath,
+		Name:    filepath.Base(srcPath),
+		Size:    srcInfo.Size(),
+		ModTime: srcInfo.ModTime(),
+	}, destPath, false); err != nil {
+		t.Fatalf("failed to preload state entry: %v", err)
+	}
 	if err := st.Save(); err != nil {
 		t.Fatalf("failed to save preloaded state: %v", err)
 	}
@@ -507,7 +718,7 @@ func TestPipelineRun_ConflictSkipSkipsTask(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pipeline run failed: %v", err)
 	}
-	if summary.TotalFiles != 1 || summary.Copied != 0 || summary.Skipped != 0 {
+	if summary.TotalFiles != 1 || summary.Copied != 0 || summary.Skipped != 1 {
 		t.Fatalf("unexpected summary for conflict skip path: %+v", *summary)
 	}
 }
@@ -584,7 +795,7 @@ func TestPipelineRun_ConflictPolicyActionsAreCounted(t *testing.T) {
 
 // TestPipelineRun_CopyFailureMarksFailedAndFailedStatus는 테스트 코드 동작을 검증하거나 보조합니다.
 func TestPipelineRun_CopyFailureMarksFailedAndFailedStatus(t *testing.T) {
-	// 복사 실패 시 Failed 카운터/히스토리 상태가 failed로 기록되어야 한다.
+	// 복사 실패 시 Failed 카운터/히스토리/terminal 상태가 모두 failed여야 한다.
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", filepath.Join(tmpDir, "home"))
 
@@ -610,13 +821,22 @@ func TestPipelineRun_CopyFailureMarksFailedAndFailedStatus(t *testing.T) {
 		t.Fatalf("failed to create pipeline: %v", err)
 	}
 	defer p.Close()
+	var terminal ProgressUpdate
+	p.SetProgressCallback(func(update ProgressUpdate) {
+		if update.Type == "complete" || update.Type == "error" {
+			terminal = update
+		}
+	})
 
 	summary, err := p.Run()
-	if err != nil {
-		t.Fatalf("pipeline run should not return copy error directly: %v", err)
+	if !errors.Is(err, ErrRunFailed) {
+		t.Fatalf("expected failed run error, got %v", err)
 	}
 	if summary.Failed != 1 {
 		t.Fatalf("expected failed=1, got %+v", *summary)
+	}
+	if terminal.Type != "error" || terminal.Summary != summary || !errors.Is(err, ErrRunFailed) {
+		t.Fatalf("copy failure was not emitted as terminal error: %+v", terminal)
 	}
 
 	m, err := config.NewUserDataManager()
@@ -632,9 +852,71 @@ func TestPipelineRun_CopyFailureMarksFailedAndFailedStatus(t *testing.T) {
 	}
 }
 
+type partialFailureCopier struct{}
+
+func (partialFailureCopier) CopyAll(_ context.Context, tasks []types.CopyTask, results chan<- copier.CopyResult) {
+	defer close(results)
+	for index, task := range tasks {
+		if index == 0 {
+			task.Status = types.TaskStatusCompleted
+			task.Action = types.CopyActionCopied
+			results <- copier.CopyResult{Task: task}
+			continue
+		}
+		err := errors.New("injected copy failure")
+		task.Status = types.TaskStatusFailed
+		task.Error = err.Error()
+		results <- copier.CopyResult{Task: task, Error: err}
+	}
+}
+
+func TestPipelineRun_PartialCopyFailureReturnsTerminalErrorWithSummary(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", filepath.Join(tmpDir, "home"))
+	sourceDir := filepath.Join(tmpDir, "src")
+	destDir := filepath.Join(tmpDir, "dest")
+	if err := os.MkdirAll(sourceDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(destDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"first.jpg", "second.jpg"} {
+		if err := os.WriteFile(filepath.Join(sourceDir, name), []byte(name), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cfg := newTestConfig(tmpDir, sourceDir, destDir)
+	cfg.IgnoreState = true
+	p, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	p.copier = partialFailureCopier{}
+	var terminal ProgressUpdate
+	p.SetProgressCallback(func(update ProgressUpdate) {
+		if update.Type == "complete" || update.Type == "error" {
+			terminal = update
+		}
+	})
+
+	summary, err := p.Run()
+	if !errors.Is(err, ErrRunFailed) {
+		t.Fatalf("expected partial failure to fail the run, got %v", err)
+	}
+	if summary.Copied != 1 || summary.Failed != 1 {
+		t.Fatalf("unexpected partial failure summary: %+v", summary)
+	}
+	if terminal.Type != "error" || terminal.Summary != summary || terminal.Error == "" {
+		t.Fatalf("partial failure terminal did not preserve summary/error: %+v", terminal)
+	}
+}
+
 // TestPipelineRun_StateAndHistorySaveFailuresAreIgnored는 테스트 코드 동작을 검증하거나 보조합니다.
-func TestPipelineRun_StateAndHistorySaveFailuresAreIgnored(t *testing.T) {
-	// state 저장/히스토리 저장 실패가 발생해도 Run은 summary를 반환해야 한다.
+func TestPipelineRun_StateAndHistorySaveFailuresAreReportedAsWarnings(t *testing.T) {
+	// 파일 복사는 성공으로 유지하되 state/히스토리 저장 실패는 summary에 노출해야 한다.
 	tmpDir := t.TempDir()
 	homeDir := filepath.Join(tmpDir, "home")
 	t.Setenv("HOME", homeDir)
@@ -659,11 +941,15 @@ func TestPipelineRun_StateAndHistorySaveFailuresAreIgnored(t *testing.T) {
 	}
 	defer p.Close()
 
-	// state 저장 실패 유도: state 파일의 부모 경로를 파일로 막는다.
+	// state 저장 실패 유도: lock 이후의 복사 progress에서 state 부모 경로를 파일로 막는다.
 	stateParent := filepath.Dir(cfg.StateFile)
-	if err := os.WriteFile(stateParent, []byte("block"), 0644); err != nil {
-		t.Fatalf("failed to create state parent blocker: %v", err)
-	}
+	p.SetProgressCallback(func(update ProgressUpdate) {
+		if update.Type == "progress" {
+			if err := os.WriteFile(stateParent, []byte("block"), 0644); err != nil && !errors.Is(err, os.ErrExist) {
+				t.Errorf("failed to create state parent blocker: %v", err)
+			}
+		}
+	})
 
 	// 히스토리 저장 실패 유도: backup-history.json 경로를 디렉터리로 점유한다.
 	blockPath := filepath.Join(homeDir, ".shutterpipe", "backup-history.json")
@@ -677,6 +963,90 @@ func TestPipelineRun_StateAndHistorySaveFailuresAreIgnored(t *testing.T) {
 	}
 	if summary == nil || summary.Copied != 1 {
 		t.Fatalf("unexpected summary while save failures are ignored: %+v", summary)
+	}
+	if len(summary.Warnings) != 2 {
+		t.Fatalf("expected state and history warnings, got %#v", summary.Warnings)
+	}
+	if !strings.Contains(summary.Warnings[0], "처리 상태") || !strings.Contains(summary.Warnings[1], "백업 이력") {
+		t.Fatalf("unexpected persistence warnings: %#v", summary.Warnings)
+	}
+}
+
+type sourceChangedBeforeStateCopier struct{}
+
+func (sourceChangedBeforeStateCopier) CopyAll(_ context.Context, tasks []types.CopyTask, results chan<- copier.CopyResult) {
+	defer close(results)
+	for _, task := range tasks {
+		original, err := os.ReadFile(task.Source.Path)
+		if err != nil {
+			results <- copier.CopyResult{Task: task, Error: err}
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(task.DestPath), 0755); err != nil {
+			results <- copier.CopyResult{Task: task, Error: err}
+			continue
+		}
+		if err := os.WriteFile(task.DestPath, original, 0644); err != nil {
+			results <- copier.CopyResult{Task: task, Error: err}
+			continue
+		}
+		changed := append([]byte(nil), original...)
+		for index := range changed {
+			changed[index] ^= 0xff
+		}
+		if err := os.WriteFile(task.Source.Path, changed, 0644); err != nil {
+			results <- copier.CopyResult{Task: task, Error: err}
+			continue
+		}
+		if err := os.Chtimes(task.Source.Path, task.Source.ModTime, task.Source.ModTime); err != nil {
+			results <- copier.CopyResult{Task: task, Error: err}
+			continue
+		}
+		verifiedHash := sha256.Sum256(original)
+		task.Status = types.TaskStatusCompleted
+		task.Action = types.CopyActionCopied
+		results <- copier.CopyResult{Task: task, VerifiedSourceHash: verifiedHash[:]}
+	}
+}
+
+func TestPipelineRun_HashStateCommitRejectsChangedVerifiedSnapshot(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", filepath.Join(tmpDir, "home"))
+	sourceDir := filepath.Join(tmpDir, "src")
+	destDir := filepath.Join(tmpDir, "dest")
+	if err := os.MkdirAll(sourceDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(destDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	sourcePath := filepath.Join(sourceDir, "photo.jpg")
+	if err := os.WriteFile(sourcePath, []byte("AAAA"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := newTestConfig(tmpDir, sourceDir, destDir)
+	cfg.HashVerify = true
+	p, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	p.copier = sourceChangedBeforeStateCopier{}
+
+	summary, err := p.Run()
+	if err != nil {
+		t.Fatalf("copy outcome should remain successful, got %v", err)
+	}
+	if summary.Copied != 1 || len(summary.Warnings) == 0 || !strings.Contains(summary.Warnings[0], "verified snapshot changed") {
+		t.Fatalf("state commit mismatch was not exposed: %+v", summary)
+	}
+	saved, err := state.Load(cfg.StateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := saved.Processed[sourcePath]; ok {
+		t.Fatal("changed source was permanently recorded as processed")
 	}
 }
 
@@ -807,6 +1177,74 @@ func (e *blockingMetadataExtractor) ExtractWithContext(ctx context.Context, _ ty
 	return types.MediaMetadata{}, ctx.Err()
 }
 
+type deadlineContext struct {
+	expired bool
+}
+
+func (c *deadlineContext) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (c *deadlineContext) Done() <-chan struct{}       { return nil }
+func (c *deadlineContext) Err() error {
+	if c.expired {
+		return context.DeadlineExceeded
+	}
+	return nil
+}
+func (c *deadlineContext) Value(any) any { return nil }
+
+type expiringMetadataExtractor struct {
+	ctx *deadlineContext
+}
+
+func (e expiringMetadataExtractor) ExtractWithContext(context.Context, types.FileEntry) (types.MediaMetadata, error) {
+	e.ctx.expired = true
+	return types.MediaMetadata{}, context.DeadlineExceeded
+}
+
+func TestPipelineRunWithContext_DeadlineDuringMetadataCannotComplete(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", filepath.Join(tmpDir, "home"))
+	sourceDir := filepath.Join(tmpDir, "src")
+	destDir := filepath.Join(tmpDir, "dest")
+	if err := os.MkdirAll(sourceDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(destDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceDir, "photo.jpg"), []byte("photo"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := newTestConfig(tmpDir, sourceDir, destDir)
+	p, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	ctx := &deadlineContext{}
+	p.meta = expiringMetadataExtractor{ctx: ctx}
+
+	summary, runErr := p.RunWithContext(ctx)
+	if !errors.Is(runErr, ErrRunCanceled) || !errors.Is(runErr, context.DeadlineExceeded) {
+		t.Fatalf("expected canceled deadline error, got %v", runErr)
+	}
+	if summary == nil || summary.Copied != 0 || summary.BytesCopied != 0 {
+		t.Fatalf("deadline produced a successful copy summary: %+v", summary)
+	}
+
+	historyManager, err := config.NewUserDataManager()
+	if err != nil {
+		t.Fatal(err)
+	}
+	history, err := historyManager.LoadBackupHistory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(history.Entries) == 0 || history.Entries[0].Status != types.BackupStatusCanceled {
+		t.Fatalf("deadline was not recorded as canceled: %+v", history.Entries)
+	}
+}
+
 func TestPipelineRunWithContext_CancelDuringMetadataExtraction(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", filepath.Join(tmpDir, "home"))
@@ -857,5 +1295,563 @@ func TestPipelineRunWithContext_CancelDuringMetadataExtraction(t *testing.T) {
 	}
 	if len(history.Entries) == 0 || history.Entries[0].Status != types.BackupStatusCanceled {
 		t.Fatalf("expected canceled history entry, got %+v", history.Entries)
+	}
+}
+
+func TestPipelineRun_RenamePolicyPreservesSameNamedFilesFromDifferentDirectories(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", filepath.Join(tmpDir, "home"))
+	sourceDir := filepath.Join(tmpDir, "src")
+	destDir := filepath.Join(tmpDir, "dest")
+
+	for dir, content := range map[string]string{"card-a": "first-photo", "card-b": "second-photo"} {
+		path := filepath.Join(sourceDir, dir, "photo.jpg")
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			t.Fatalf("failed to create source directory: %v", err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+			t.Fatalf("failed to create source file: %v", err)
+		}
+	}
+	if err := os.MkdirAll(destDir, 0755); err != nil {
+		t.Fatalf("failed to create destination: %v", err)
+	}
+
+	cfg := newTestConfig(tmpDir, sourceDir, destDir)
+	cfg.ConflictPolicy = types.ConflictPolicyRename
+	cfg.IgnoreState = true
+	cfg.Jobs = 2
+	p, err := New(cfg)
+	if err != nil {
+		t.Fatalf("failed to create pipeline: %v", err)
+	}
+	defer p.Close()
+
+	summary, err := p.Run()
+	if err != nil {
+		t.Fatalf("pipeline run failed: %v", err)
+	}
+	if summary.Copied != 1 || summary.Renamed != 1 || summary.Failed != 0 {
+		t.Fatalf("unexpected summary: %+v", summary)
+	}
+
+	contents := map[string]bool{}
+	for _, name := range []string{"photo.jpg", "photo_1.jpg"} {
+		data, err := os.ReadFile(filepath.Join(destDir, "unclassified", name))
+		if err != nil {
+			t.Fatalf("failed to read %s: %v", name, err)
+		}
+		contents[string(data)] = true
+	}
+	if !contents["first-photo"] || !contents["second-photo"] {
+		t.Fatalf("both source files were not preserved: %+v", contents)
+	}
+}
+
+func TestPipelineRun_OverwriteReservedDestinationUsesDeterministicLastPlannedSource(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", filepath.Join(tmpDir, "home"))
+	sourceDir := filepath.Join(tmpDir, "src")
+	destDir := filepath.Join(tmpDir, "dest")
+	for dir, content := range map[string]string{"card-a": "first-photo", "card-b": "second-photo"} {
+		path := filepath.Join(sourceDir, dir, "photo.jpg")
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			t.Fatalf("failed to create source directory: %v", err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+			t.Fatalf("failed to create source file: %v", err)
+		}
+	}
+	if err := os.MkdirAll(destDir, 0755); err != nil {
+		t.Fatalf("failed to create destination: %v", err)
+	}
+
+	cfg := newTestConfig(tmpDir, sourceDir, destDir)
+	cfg.ConflictPolicy = types.ConflictPolicyOverwrite
+	cfg.IgnoreState = false
+	cfg.Jobs = 2
+	p, err := New(cfg)
+	if err != nil {
+		t.Fatalf("failed to create pipeline: %v", err)
+	}
+	summary, err := p.Run()
+	if err != nil {
+		t.Fatalf("pipeline run failed: %v", err)
+	}
+	if summary.Copied != 1 || summary.Overwritten != 1 || summary.Failed != 0 {
+		t.Fatalf("unexpected summary: %+v", summary)
+	}
+	if summary.TotalFiles != summary.Copied+summary.Skipped+summary.Renamed+summary.Overwritten+summary.Quarantined+summary.Failed {
+		t.Fatalf("overwrite summary does not account for every input: %+v", summary)
+	}
+	data, err := os.ReadFile(filepath.Join(destDir, "unclassified", "photo.jpg"))
+	if err != nil {
+		t.Fatalf("failed to read final file: %v", err)
+	}
+	if string(data) != "second-photo" {
+		t.Fatalf("expected last planned source to win, got %q", data)
+	}
+	if err := p.Close(); err != nil {
+		t.Fatalf("failed to close first pipeline: %v", err)
+	}
+
+	// A repeated run must not reverse the winner because only the collapsed task
+	// was recorded in state.
+	p, err = New(cfg)
+	if err != nil {
+		t.Fatalf("failed to create second pipeline: %v", err)
+	}
+	if _, err := p.Run(); err != nil {
+		t.Fatalf("second pipeline run failed: %v", err)
+	}
+	p.Close()
+	data, err = os.ReadFile(filepath.Join(destDir, "unclassified", "photo.jpg"))
+	if err != nil || string(data) != "second-photo" {
+		t.Fatalf("repeated run reversed overwrite winner: data=%q err=%v", data, err)
+	}
+
+	// If an earlier source changes, the last planned source still wins and all
+	// members of the destination group are re-recorded together.
+	if err := os.WriteFile(filepath.Join(sourceDir, "card-a", "photo.jpg"), []byte("first-photo-changed"), 0644); err != nil {
+		t.Fatalf("failed to change earlier source: %v", err)
+	}
+	p, err = New(cfg)
+	if err != nil {
+		t.Fatalf("failed to create third pipeline: %v", err)
+	}
+	defer p.Close()
+	if _, err := p.Run(); err != nil {
+		t.Fatalf("third pipeline run failed: %v", err)
+	}
+	data, err = os.ReadFile(filepath.Join(destDir, "unclassified", "photo.jpg"))
+	if err != nil || string(data) != "second-photo" {
+		t.Fatalf("changed earlier source reversed overwrite winner: data=%q err=%v", data, err)
+	}
+}
+
+func TestPipelineRun_OverwriteAliasReplayKeepsLastWinnerOnCaseInsensitiveDestination(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", filepath.Join(tmpDir, "home"))
+	sourceDir := filepath.Join(tmpDir, "src")
+	destDir := filepath.Join(tmpDir, "dest")
+	if err := os.MkdirAll(destDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	probe := filepath.Join(destDir, "CaseProbe")
+	if err := os.WriteFile(probe, []byte("probe"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(destDir, "caseprobe")); err != nil {
+		os.Remove(probe)
+		t.Skip("destination filesystem is case-sensitive")
+	}
+	if err := os.Remove(probe); err != nil {
+		t.Fatal(err)
+	}
+
+	firstPath := filepath.Join(sourceDir, "card-a", "Photo.jpg")
+	lastPath := filepath.Join(sourceDir, "card-b", "photo.jpg")
+	for path, content := range map[string]string{firstPath: "first-photo", lastPath: "last-photo"} {
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cfg := newTestConfig(tmpDir, sourceDir, destDir)
+	cfg.ConflictPolicy = types.ConflictPolicyOverwrite
+	cfg.IgnoreState = false
+	cfg.Jobs = 8
+	run := func() *types.RunSummary {
+		p, err := New(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		summary, runErr := p.Run()
+		closeErr := p.Close()
+		if runErr != nil || closeErr != nil {
+			t.Fatalf("pipeline run failed: run=%v close=%v", runErr, closeErr)
+		}
+		return summary
+	}
+
+	finalPath := filepath.Join(destDir, "unclassified", "photo.jpg")
+	p, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.copier = cancelAfterFirstOverwriteCopier{}
+	cancelledSummary, runErr := p.RunWithContext(context.Background())
+	closeErr := p.Close()
+	if !errors.Is(runErr, ErrRunCanceled) || closeErr != nil {
+		t.Fatalf("expected injected cancellation: run=%v close=%v", runErr, closeErr)
+	}
+	if cancelledSummary.Overwritten != 1 {
+		t.Fatalf("expected first alias to commit before cancellation: %+v", cancelledSummary)
+	}
+	data, err := os.ReadFile(finalPath)
+	if err != nil || string(data) != "first-photo" {
+		t.Fatalf("test did not establish the partial earlier winner: data=%q err=%v", data, err)
+	}
+
+	recovered := run()
+	data, err = os.ReadFile(finalPath)
+	if err != nil || string(data) != "last-photo" {
+		t.Fatalf("next run did not restore the last alias winner: data=%q err=%v", data, err)
+	}
+	if recovered.TotalFiles != 2 || recovered.Overwritten != 2 || recovered.Failed != 0 {
+		t.Fatalf("recovery replay was not fully accounted for: %+v", recovered)
+	}
+
+	if err := os.WriteFile(firstPath, []byte("first-photo-changed"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	summary := run()
+	data, err = os.ReadFile(finalPath)
+	if err != nil || string(data) != "last-photo" {
+		t.Fatalf("dirty earlier alias reversed clean last winner: data=%q err=%v", data, err)
+	}
+	if summary.TotalFiles != 1 || summary.Overwritten != 1 || summary.Failed != 0 {
+		t.Fatalf("dirty alias group was not narrowed to one final winner: %+v", summary)
+	}
+}
+
+func TestPipelineRun_OverwriteReplaysOnlyDirtyDestinationGroup(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", filepath.Join(tmpDir, "home"))
+	sourceDir := filepath.Join(tmpDir, "src")
+	destDir := filepath.Join(tmpDir, "dest")
+	firstPath := filepath.Join(sourceDir, "first.jpg")
+	secondPath := filepath.Join(sourceDir, "second.jpg")
+	if err := os.MkdirAll(sourceDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(firstPath, []byte("first"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(secondPath, []byte("second"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := newTestConfig(tmpDir, sourceDir, destDir)
+	cfg.ConflictPolicy = types.ConflictPolicyOverwrite
+	cfg.IgnoreState = false
+	cfg.Jobs = 8
+	run := func() *types.RunSummary {
+		p, err := New(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		summary, runErr := p.Run()
+		closeErr := p.Close()
+		if runErr != nil || closeErr != nil {
+			t.Fatalf("pipeline run failed: run=%v close=%v", runErr, closeErr)
+		}
+		return summary
+	}
+	run()
+
+	if err := os.WriteFile(firstPath, []byte("first-changed"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	summary := run()
+	if summary.TotalFiles != 1 || summary.Overwritten != 1 || summary.Failed != 0 {
+		t.Fatalf("unrelated clean destination was replayed: %+v", summary)
+	}
+	data, err := os.ReadFile(filepath.Join(destDir, "unclassified", "second.jpg"))
+	if err != nil || string(data) != "second" {
+		t.Fatalf("unrelated destination changed: data=%q err=%v", data, err)
+	}
+
+	secondDest := filepath.Join(destDir, "unclassified", "second.jpg")
+	if err := os.Remove(secondDest); err != nil {
+		t.Fatal(err)
+	}
+	recovered := run()
+	if recovered.TotalFiles != 1 || recovered.Copied != 1 || recovered.Failed != 0 {
+		t.Fatalf("missing processed destination was not recovered: %+v", recovered)
+	}
+	data, err = os.ReadFile(secondDest)
+	if err != nil || string(data) != "second" {
+		t.Fatalf("missing destination recovery failed: data=%q err=%v", data, err)
+	}
+}
+
+func TestPipelineRun_OverwriteReplaysSameSizeSourceAndDestinationChanges(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", filepath.Join(tmpDir, "home"))
+	sourceDir := filepath.Join(tmpDir, "src")
+	destDir := filepath.Join(tmpDir, "dest")
+	if err := os.MkdirAll(sourceDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(destDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	sourcePath := filepath.Join(sourceDir, "photo.jpg")
+	if err := os.WriteFile(sourcePath, []byte("first1"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := newTestConfig(tmpDir, sourceDir, destDir)
+	cfg.ConflictPolicy = types.ConflictPolicyOverwrite
+	p, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	if _, err := p.Run(); err != nil {
+		t.Fatal(err)
+	}
+	destPath := filepath.Join(destDir, cfg.UnclassifiedDir, "photo.jpg")
+
+	if err := os.WriteFile(sourcePath, []byte("second"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	future := time.Now().Add(2 * time.Second)
+	if err := os.Chtimes(sourcePath, future, future); err != nil {
+		t.Fatal(err)
+	}
+	summary, err := p.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.Overwritten != 1 {
+		t.Fatalf("same-size source change was not replayed: %+v", summary)
+	}
+	data, err := os.ReadFile(destPath)
+	if err != nil || string(data) != "second" {
+		t.Fatalf("source change not reflected: data=%q err=%v", data, err)
+	}
+
+	if err := os.WriteFile(destPath, []byte("damage"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	later := future.Add(2 * time.Second)
+	if err := os.Chtimes(destPath, later, later); err != nil {
+		t.Fatal(err)
+	}
+	summary, err = p.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.Overwritten != 1 {
+		t.Fatalf("same-size destination damage was not replayed: %+v", summary)
+	}
+	data, err = os.ReadFile(destPath)
+	if err != nil || string(data) != "second" {
+		t.Fatalf("destination damage not repaired: data=%q err=%v", data, err)
+	}
+}
+
+func TestClassifyCopyResultError_CancelWithCleanupFailureCountsFailure(t *testing.T) {
+	cleanupErr := errors.New("failed to remove partial file")
+	cancelled, countFailure := classifyCopyResultError(errors.Join(context.Canceled, cleanupErr))
+	if !cancelled || !countFailure {
+		t.Fatalf("expected cancelled failure, got cancelled=%v countFailure=%v", cancelled, countFailure)
+	}
+
+	cancelled, countFailure = classifyCopyResultError(context.Canceled)
+	if !cancelled || countFailure {
+		t.Fatalf("pure cancellation must not count as failure: cancelled=%v countFailure=%v", cancelled, countFailure)
+	}
+}
+
+type joinedCancellationCopier struct {
+	err error
+}
+
+func (c joinedCancellationCopier) CopyAll(_ context.Context, tasks []types.CopyTask, results chan<- copier.CopyResult) {
+	defer close(results)
+	task := tasks[0]
+	task.Status = types.TaskStatusFailed
+	task.Error = c.err.Error()
+	results <- copier.CopyResult{Task: task, Error: c.err}
+}
+
+type lateSkipCopier struct{}
+
+func (lateSkipCopier) CopyAll(_ context.Context, tasks []types.CopyTask, results chan<- copier.CopyResult) {
+	defer close(results)
+	task := tasks[0]
+	task.Status = types.TaskStatusSkipped
+	task.Action = types.CopyActionSkipped
+	results <- copier.CopyResult{Task: task}
+}
+
+type cancelAfterFirstOverwriteCopier struct{}
+
+func (cancelAfterFirstOverwriteCopier) CopyAll(_ context.Context, tasks []types.CopyTask, results chan<- copier.CopyResult) {
+	defer close(results)
+	first := tasks[0]
+	data, err := os.ReadFile(first.Source.Path)
+	if err != nil {
+		results <- copier.CopyResult{Task: first, Error: err}
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(first.DestPath), 0755); err != nil {
+		results <- copier.CopyResult{Task: first, Error: err}
+		return
+	}
+	if err := os.WriteFile(first.DestPath, data, 0644); err != nil {
+		results <- copier.CopyResult{Task: first, Error: err}
+		return
+	}
+	first.Status = types.TaskStatusCompleted
+	first.Action = types.CopyActionOverwritten
+	results <- copier.CopyResult{Task: first}
+
+	last := tasks[1]
+	last.Status = types.TaskStatusFailed
+	last.Error = context.Canceled.Error()
+	results <- copier.CopyResult{Task: last, Error: context.Canceled}
+}
+
+func TestPipelineRun_LateSkipDoesNotMarkSourceProcessed(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", filepath.Join(tmpDir, "home"))
+	sourceDir := filepath.Join(tmpDir, "src")
+	destDir := filepath.Join(tmpDir, "dest")
+	if err := os.MkdirAll(sourceDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(destDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	sourcePath := filepath.Join(sourceDir, "photo.jpg")
+	if err := os.WriteFile(sourcePath, []byte("photo"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := newTestConfig(tmpDir, sourceDir, destDir)
+	cfg.IgnoreState = false
+	p, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	p.copier = lateSkipCopier{}
+
+	summary, err := p.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.Skipped != 1 || summary.Failed != 0 {
+		t.Fatalf("unexpected late-skip summary: %+v", summary)
+	}
+	if p.state.IsProcessed(sourcePath, int64(len("photo"))) {
+		t.Fatal("late conflict skip marked an uncopied source as processed")
+	}
+}
+
+func TestPipelineRun_SourceTruncatedAfterScanFailsWithoutPublishingOrState(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", filepath.Join(tmpDir, "home"))
+	sourceDir := filepath.Join(tmpDir, "src")
+	destDir := filepath.Join(tmpDir, "dest")
+	if err := os.MkdirAll(sourceDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(destDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	sourcePath := filepath.Join(sourceDir, "photo.jpg")
+	original := []byte("originally-longer")
+	if err := os.WriteFile(sourcePath, original, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := newTestConfig(tmpDir, sourceDir, destDir)
+	cfg.HashVerify = false
+	p, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	p.meta = truncatingMetadataExtractor{size: int64(len("short"))}
+
+	summary, runErr := p.Run()
+	if !errors.Is(runErr, ErrRunFailed) {
+		t.Fatalf("expected failed run after source truncation, got %v", runErr)
+	}
+	if summary == nil || summary.Failed != 1 || summary.Copied != 0 || summary.BytesCopied != 0 {
+		t.Fatalf("truncated source was counted as copied: %+v", summary)
+	}
+	if p.state.IsProcessed(sourcePath, int64(len(original))) {
+		t.Fatal("truncated source was marked processed")
+	}
+	destPath := filepath.Join(destDir, cfg.UnclassifiedDir, "photo.jpg")
+	if _, err := os.Stat(destPath); !os.IsNotExist(err) {
+		t.Fatalf("truncated source was published, stat err=%v", err)
+	}
+	parts, err := filepath.Glob(filepath.Join(filepath.Dir(destPath), ".photo.jpg.*.part"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(parts) != 0 {
+		t.Fatalf("staged files were not cleaned up: %v", parts)
+	}
+}
+
+func TestPipelineRun_CancelCleanupFailureIsLoggedAndRecordedAsCanceledFailure(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", filepath.Join(tmpDir, "home"))
+	sourceDir := filepath.Join(tmpDir, "src")
+	destDir := filepath.Join(tmpDir, "dest")
+	if err := os.MkdirAll(sourceDir, 0755); err != nil {
+		t.Fatalf("failed to create source: %v", err)
+	}
+	if err := os.MkdirAll(destDir, 0755); err != nil {
+		t.Fatalf("failed to create destination: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceDir, "photo.jpg"), []byte("photo"), 0644); err != nil {
+		t.Fatalf("failed to create source file: %v", err)
+	}
+
+	cfg := newTestConfig(tmpDir, sourceDir, destDir)
+	cfg.IgnoreState = true
+	p, err := New(cfg)
+	if err != nil {
+		t.Fatalf("failed to create pipeline: %v", err)
+	}
+	defer p.Close()
+	cleanupErr := errors.New("failed to remove task part file")
+	p.copier = joinedCancellationCopier{err: errors.Join(context.Canceled, cleanupErr)}
+	var failedProgress ProgressUpdate
+	p.SetProgressCallback(func(update ProgressUpdate) {
+		if update.Type == "progress" {
+			failedProgress = update
+		}
+	})
+
+	summary, err := p.RunWithContext(context.Background())
+	if !errors.Is(err, ErrRunCanceled) {
+		t.Fatalf("expected canceled run, got %v", err)
+	}
+	if summary == nil || summary.Failed != 1 || summary.Copied != 0 || summary.Renamed != 0 || summary.BytesCopied != 0 {
+		t.Fatalf("expected one failed cleanup in canceled summary, got %+v", summary)
+	}
+	if failedProgress.Action != types.CopyActionFailed || !strings.Contains(failedProgress.Error, cleanupErr.Error()) {
+		t.Fatalf("failed progress was not exposed to the UI: %+v", failedProgress)
+	}
+
+	logData, err := os.ReadFile(cfg.LogFile)
+	if err != nil {
+		t.Fatalf("failed to read log: %v", err)
+	}
+	if !strings.Contains(string(logData), cleanupErr.Error()) {
+		t.Fatalf("cleanup failure missing from log: %s", logData)
+	}
+
+	historyManager, err := config.NewUserDataManager()
+	if err != nil {
+		t.Fatalf("failed to create history manager: %v", err)
+	}
+	history, err := historyManager.LoadBackupHistory()
+	if err != nil {
+		t.Fatalf("failed to load history: %v", err)
+	}
+	if len(history.Entries) == 0 || history.Entries[0].Status != types.BackupStatusCanceled || history.Entries[0].Summary.Failed != 1 {
+		t.Fatalf("expected canceled history with cleanup failure, got %+v", history.Entries)
 	}
 }

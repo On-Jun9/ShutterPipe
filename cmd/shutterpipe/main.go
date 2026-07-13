@@ -98,7 +98,7 @@ func runPipeline(cmd *cobra.Command, args []string) error {
 	if len(includeExt) > 0 {
 		cfg.IncludeExtensions = includeExt
 	}
-	if jobs > 0 {
+	if cmd.Flags().Changed("jobs") {
 		cfg.Jobs = jobs
 	}
 	if dedupMethod != "" {

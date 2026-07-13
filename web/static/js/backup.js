@@ -1,6 +1,34 @@
 // Backup Module
 // 백업 실행 및 WebSocket 통신
 
+const observedTerminalRuns = new Set();
+const terminalObservationStorageKey = 'shutterpipe.lastObservedTerminal';
+
+function terminalObservationKey(serverId, runId) {
+    return `${serverId || 'unknown'}:${runId || ''}`;
+}
+
+function hasObservedTerminalRun(serverId, runId) {
+    const key = terminalObservationKey(serverId, runId);
+    if (observedTerminalRuns.has(key)) return true;
+    try {
+        return window.localStorage?.getItem(terminalObservationStorageKey) === key;
+    } catch (_error) {
+        return false;
+    }
+}
+
+function rememberTerminalRun(serverId, runId) {
+    if (!runId) return;
+    const key = terminalObservationKey(serverId, runId);
+    observedTerminalRuns.add(key);
+    try {
+        window.localStorage?.setItem(terminalObservationStorageKey, key);
+    } catch (_error) {
+        // In-memory tracking still prevents repeat handling in this page.
+    }
+}
+
 // UI 초기화 함수
 function resetBackupUI(message = '오류 발생') {
     const progressBar = document.getElementById('progressBar');
@@ -25,6 +53,189 @@ function setCancelButtonState(enabled, pending = false) {
     cancelBtn.textContent = pending ? '취소 요청 중...' : '취소';
 }
 
+function createRunId() {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+        return crypto.randomUUID();
+    }
+    return `run-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function beginTrackingRun(runId, status = 'running') {
+    currentRunId = runId;
+    terminalRunId = null;
+    runStatus = status;
+    isRunning = status !== 'idle';
+    runStateRevision++;
+}
+
+function observeServerInstance(serverId) {
+    if (!serverId) return 'unknown';
+    if (serverId === lastServerId) return 'current';
+    if (retiredServerIds.has(serverId)) return 'stale';
+    if (lastServerId && lastServerId !== serverId) {
+        retiredServerIds.add(lastServerId);
+        lastServerRevision = 0;
+        currentRunId = null;
+        terminalRunId = null;
+        runStatus = 'idle';
+        isRunning = false;
+        runStartPending = false;
+        runRequestSent = false;
+        runCancelPending = false;
+        runCancelRequested = false;
+        runStateRevision++;
+        lastServerId = serverId;
+        return 'changed';
+    }
+    lastServerId = serverId;
+    return 'current';
+}
+
+function finishTrackedRun(runId, markTerminal = true) {
+    if (runId && currentRunId && runId !== currentRunId) {
+        return false;
+    }
+
+    if (markTerminal) {
+        terminalRunId = runId || currentRunId;
+    }
+    currentRunId = null;
+    runStatus = 'idle';
+    isRunning = false;
+    runStartPending = false;
+    runRequestSent = false;
+    runCancelPending = false;
+    runCancelRequested = false;
+    runStateRevision++;
+    return true;
+}
+
+function acceptProgressUpdate(update) {
+    const runId = update.run_id || null;
+    if (observeServerInstance(update.server_id || null) === 'stale') {
+        return false;
+    }
+    if (Number.isFinite(update.revision) && update.revision < lastServerRevision) {
+        return false;
+    }
+    if (!runId) {
+        return true; // 이전 서버와의 하위 호환
+    }
+    if (terminalRunId === runId) {
+        return false;
+    }
+    if (currentRunId && currentRunId !== runId) {
+        return false;
+    }
+    if (!currentRunId) {
+        beginTrackingRun(runId);
+        runStartPending = false;
+        runRequestSent = true;
+    }
+    if (Number.isFinite(update.revision)) {
+        lastServerRevision = Math.max(lastServerRevision, update.revision);
+    }
+    return true;
+}
+
+function restoreRunningUI(status) {
+    runStartPending = false;
+    runRequestSent = true;
+    runCancelPending = false;
+    runCancelRequested = status === 'cancelling';
+    document.getElementById('startBtn').disabled = true;
+    setCancelButtonState(status === 'running');
+
+    const progressSection = document.getElementById('progressSection');
+    if (progressSection) progressSection.style.display = 'block';
+    const progressText = document.getElementById('progressText');
+    if (progressText) {
+        progressText.textContent = status === 'cancelling'
+            ? '취소 요청 중...'
+            : '실행 중인 백업에 다시 연결되었습니다.';
+    }
+}
+
+async function synchronizeRunStatus(expectedRunId = null) {
+    const requestedRevision = runStateRevision;
+    const result = await getBackupRunStatusFromServer();
+    if (!result.success) {
+        addLogEntry(`백업 상태 조회 실패: ${result.error || result.status}`, 'warning');
+        return { resolved: false, result };
+    }
+
+    // 조회 도중 WebSocket 이벤트나 사용자 요청이 상태를 바꿨다면 조회 결과는 오래된 값이다.
+    if (requestedRevision !== runStateRevision) {
+        return { resolved: false, stale: true, result };
+    }
+    if (observeServerInstance(result.serverId || null) === 'stale') {
+        return { resolved: false, stale: true, result };
+    }
+    if (Number.isFinite(result.revision) && result.revision < lastServerRevision) {
+        return { resolved: false, stale: true, result };
+    }
+
+    if (result.runStatus === 'complete' || result.runStatus === 'cancelled' || result.runStatus === 'error') {
+        if (expectedRunId && result.runId !== expectedRunId) {
+            return { resolved: true, mismatch: true, result };
+        }
+        if (!result.runId || terminalRunId === result.runId) {
+            return { resolved: true, terminal: true, result };
+        }
+        if (hasObservedTerminalRun(result.serverId, result.runId)) {
+            terminalRunId = result.runId;
+            if (Number.isFinite(result.revision)) {
+                lastServerRevision = Math.max(lastServerRevision, result.revision);
+            }
+            return { resolved: true, terminal: true, observed: true, result };
+        }
+        if (currentRunId && currentRunId !== result.runId) {
+            return { resolved: true, mismatch: true, result };
+        }
+        handleProgressUpdate({
+            type: result.runStatus,
+            run_id: result.runId,
+            server_id: result.serverId,
+            summary: result.summary,
+            error: result.error,
+            revision: result.revision,
+            message: result.runStatus === 'cancelled' ? '백업이 취소되었습니다.' : undefined
+        });
+        return { resolved: true, terminal: true, result };
+    }
+
+    if (result.runStatus === 'running' || result.runStatus === 'cancelling') {
+        if (!result.runId || terminalRunId === result.runId) return;
+        if (expectedRunId && result.runId !== expectedRunId) {
+            return { resolved: true, mismatch: true, result };
+        }
+        if (Number.isFinite(result.revision)) {
+            lastServerRevision = Math.max(lastServerRevision, result.revision);
+        }
+        beginTrackingRun(result.runId, result.runStatus);
+        restoreRunningUI(result.runStatus);
+        return { resolved: true, active: true, result };
+    }
+
+    if (result.runStatus === 'idle' && isRunning) {
+        if (!expectedRunId && runStartPending) {
+            return { resolved: false, stale: true, result };
+        }
+        // 시작 응답 유실을 확인하는 호출자는 원래 시작 오류 처리 경로에서 UI를 정리한다.
+        if (expectedRunId && currentRunId === expectedRunId) {
+            return { resolved: true, idle: true, result };
+        }
+        finishTrackedRun(currentRunId, false);
+        setCancelButtonState(false);
+        if (typeof enableBackupButton === 'function') {
+            enableBackupButton();
+        } else {
+            document.getElementById('startBtn').disabled = false;
+        }
+    }
+    return { resolved: true, idle: result.runStatus === 'idle', result };
+}
+
 // 백업 시작
 async function startBackup() {
     addLogEntry('백업 시작 버튼 클릭됨', 'info');
@@ -47,8 +258,9 @@ async function startBackup() {
 
     // 상태 설정 (경로 검증 직후, 비동기 작업 전)
     // 이제부터 모든 비동기 작업이 플래그 보호를 받음
+    const requestedRunId = createRunId();
     runStartPending = true;
-    isRunning = true;
+    beginTrackingRun(requestedRunId);
     runRequestSent = false;
     runCancelPending = false;
     runCancelRequested = false;
@@ -70,6 +282,7 @@ async function startBackup() {
         const dateFilterEnd = document.getElementById('dateFilterEnd').value;
 
         const config = {
+            run_id: requestedRunId,
             source: source,
             dest: dest,
             organize_strategy: document.getElementById('organizeStrategy').value,
@@ -112,7 +325,42 @@ async function startBackup() {
 
         if (!runResult.success) {
             const message = runResult.error || '알 수 없는 오류';
+            // HTTP 응답 자체가 없으면 서버가 요청을 수락한 뒤 응답만 유실됐을 수 있다.
+            if (!runResult.status) {
+                if (terminalRunId === requestedRunId || currentRunId !== requestedRunId) return;
+                const reconciliation = await synchronizeRunStatus(requestedRunId);
+                if (terminalRunId === requestedRunId) return;
+                if (!reconciliation?.mismatch && (reconciliation?.active || reconciliation?.terminal)) return;
+                if (currentRunId && currentRunId !== requestedRunId) return;
+                if (!reconciliation?.resolved) {
+                    runStartPending = false;
+                    runRequestSent = true;
+                    runStatus = 'running';
+                    setCancelButtonState(true);
+                    document.getElementById('progressText').textContent = '서버 응답 유실 - 실행 상태 확인 필요';
+                    addLogEntry('시작 응답과 상태 조회가 모두 실패해 실행 상태를 보수적으로 유지합니다.', 'warning');
+                    alert('서버 응답을 확인하지 못했습니다. 백업이 실행 중일 수 있습니다.');
+                    return;
+                }
+            }
             throw new Error('백업 시작 실패: ' + message);
+        }
+
+        const serverObservation = observeServerInstance(runResult.serverId || null);
+        if (serverObservation === 'stale') return;
+        if (serverObservation === 'changed') {
+            beginTrackingRun(requestedRunId);
+            runRequestSent = true;
+        }
+
+
+        if (runResult.runId && runResult.runId !== requestedRunId) {
+            throw new Error('서버 실행 ID가 요청과 일치하지 않습니다.');
+        }
+
+        // complete/cancelled/error 이벤트가 HTTP 응답보다 먼저 도착한 경우 terminal UI를 유지한다.
+        if (terminalRunId === requestedRunId || currentRunId !== requestedRunId) {
+            return;
         }
 
         // API 요청 성공 → 시작 완료, 실행 중
@@ -131,12 +379,16 @@ async function startBackup() {
         document.getElementById('summarySection').style.display = 'none';
 
     } catch (error) {
+        if (terminalRunId === requestedRunId || currentRunId !== requestedRunId) {
+            addLogEntry(`종료된 실행의 늦은 시작 응답 무시: ${error.message}`, 'warning');
+            return;
+        }
         addLogEntry(`실행 중 예외 발생: ${error.message}`, 'error');
         alert('오류: ' + error.message);
 
         // 상태 복구 (모든 플래그 리셋)
         runStartPending = false;
-        isRunning = false;
+        finishTrackedRun(requestedRunId);
         runRequestSent = false;
         runCancelPending = false;
         runCancelRequested = false;
@@ -176,46 +428,49 @@ async function cancelBackup() {
 
     runCancelPending = true;
     setCancelButtonState(true, true);
+    const cancelRunId = currentRunId;
 
     try {
-        const cancelResult = await cancelBackupRunOnServer();
+        const cancelResult = await cancelBackupRunOnServer(cancelRunId);
         const statusText = cancelResult.status || 'NETWORK_ERROR';
         addLogEntry(`취소 요청 응답 수신: Status ${statusText}`, cancelResult.success ? 'warning' : 'error');
 
         if (!cancelResult.success) {
             if (cancelResult.status === 409) {
+                if (currentRunId !== cancelRunId || (cancelRunId && terminalRunId === cancelRunId)) return;
                 runCancelPending = false;
-                runCancelRequested = false;
-                runStartPending = false;
-                runRequestSent = false;
-
-                if (isRunning) {
-                    // complete/error가 아직 처리되지 않은 경우에만 UI 초기화
-                    isRunning = false;
+                setCancelButtonState(true);
+                const reconciliation = await synchronizeRunStatus(cancelRunId);
+                if (currentRunId === cancelRunId && (reconciliation?.mismatch || reconciliation?.idle)) {
+                    finishTrackedRun(cancelRunId, false);
                     setCancelButtonState(false);
-                    resetBackupUI('이미 종료됨');
-
                     if (typeof enableBackupButton === 'function') {
                         enableBackupButton();
                     } else {
                         document.getElementById('startBtn').disabled = false;
                     }
-
-                    if (ws) {
-                        ws.close();
-                        ws = null;
-                    }
+                    await synchronizeRunStatus();
                 }
-
-                addLogEntry('서버에 실행 중인 백업이 없어 UI 상태를 복구했습니다.', 'warning');
+                addLogEntry('취소 대상 실행이 일치하지 않아 서버 상태를 다시 확인했습니다.', 'warning');
                 return;
             }
 
             throw new Error(cancelResult.error || '알 수 없는 오류');
         }
 
+        if (cancelResult.runId && cancelResult.runId !== cancelRunId) return;
+        if (currentRunId !== cancelRunId || (cancelRunId && terminalRunId === cancelRunId)) return;
+
+        const serverObservation = observeServerInstance(cancelResult.serverId || null);
+        if (serverObservation === 'stale') return;
+        if (Number.isFinite(cancelResult.revision)) {
+            lastServerRevision = Math.max(lastServerRevision, cancelResult.revision);
+        }
+
         runCancelPending = false;
         runCancelRequested = true;
+        runStatus = cancelResult.runStatus || 'cancelling';
+        runStateRevision++;
         setCancelButtonState(false);
         document.getElementById('progressText').textContent = '취소 요청 중...';
 
@@ -225,6 +480,7 @@ async function cancelBackup() {
             addLogEntry('백업 취소 요청을 서버에 전달했습니다.', 'warning');
         }
     } catch (error) {
+        if (currentRunId !== cancelRunId || (cancelRunId && terminalRunId === cancelRunId)) return;
         runCancelPending = false;
         runCancelRequested = false;
         setCancelButtonState(isRunning && !runStartPending);
@@ -235,19 +491,31 @@ async function cancelBackup() {
 
 // WebSocket 연결
 function connectWebSocket() {
-    return new Promise((resolve, reject) => {
-        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const wsUrl = `${protocol}//${window.location.host}/api/ws`;
-
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        return Promise.resolve();
+    }
+    if (wsConnectPromise) {
+        return wsConnectPromise;
+    }
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${protocol}//${window.location.host}/api/ws`;
+    const socket = new WebSocket(wsUrl);
+    ws = socket;
+    const connectPromise = new Promise((resolve, reject) => {
         addLogEntry(`WebSocket URL: ${wsUrl}`, 'info');
-        ws = new WebSocket(wsUrl);
 
-        ws.onopen = () => {
+        socket.onopen = () => {
+            if (ws !== socket) {
+                socket.close();
+                return;
+            }
             addLogEntry('WebSocket 연결 열림', 'success');
+            if (wsConnectPromise === connectPromise) wsConnectPromise = null;
             resolve();
         };
 
-        ws.onmessage = (event) => {
+        socket.onmessage = (event) => {
+            if (ws !== socket) return;
             let update;
             try {
                 update = JSON.parse(event.data);
@@ -259,28 +527,33 @@ function connectWebSocket() {
             handleProgressUpdate(update);
         };
 
-        ws.onerror = (error) => {
+        socket.onerror = (error) => {
+            if (ws !== socket) return;
             console.error('WebSocket error:', error);
             addLogEntry('WebSocket 연결 오류 발생', 'error');
 
             // ws.onerror는 에러 로깅만 담당
             // 상태 복구는 ws.onclose에서만 처리 (error -> close 순서 방지)
+            if (wsConnectPromise === connectPromise) wsConnectPromise = null;
             reject(new Error('WebSocket connection failed'));
         };
 
-        ws.onclose = (event) => {
+        socket.onclose = (event) => {
+            if (ws !== socket) return;
             const backupMayStillBeRunning = runRequestSent || (!runStartPending && isRunning);
             const cancelInProgress = runCancelPending || runCancelRequested;
+            if (wsConnectPromise === connectPromise) wsConnectPromise = null;
+            ws = null;
             handleWebSocketClose(event, backupMayStillBeRunning, cancelInProgress);
         };
     });
+    wsConnectPromise = connectPromise;
+    return wsConnectPromise;
 }
 
 function handleWebSocketClose(event, backupMayStillBeRunning, cancelInProgress) {
     console.log('WebSocket closed');
     addLogEntry(`WebSocket 연결 종료 (Code: ${event.code})`, 'warning');
-    ws = null;
-
     if (!backupMayStillBeRunning) {
         return;
     }
@@ -293,6 +566,8 @@ function handleWebSocketClose(event, backupMayStillBeRunning, cancelInProgress) 
         }
         addLogEntry('취소 요청 처리 중 연결이 종료되어 완료 상태를 확인할 수 없습니다.', 'warning');
     } else {
+        // 실행 여부는 서버 상태가 확정할 때까지 유지하고 HTTP 취소는 계속 허용한다.
+        setCancelButtonState(true);
         addLogEntry('서버와의 연결이 끊겼습니다. 백업 상태를 확인할 수 없습니다.', 'error');
     }
 
@@ -304,6 +579,15 @@ function handleWebSocketClose(event, backupMayStillBeRunning, cancelInProgress) 
 
 // 진행 상황 업데이트 처리
 function handleProgressUpdate(update) {
+    if (!acceptProgressUpdate(update)) {
+        addLogEntry(`다른 실행의 지연된 이벤트 무시: ${update.run_id}`, 'warning');
+        return;
+    }
+
+    if (update.type === 'complete' || update.type === 'cancelled' || update.type === 'error') {
+        rememberTerminalRun(update.server_id || lastServerId, update.run_id);
+    }
+
     const progressBar = document.getElementById('progressBar');
     const progressPercent = document.getElementById('progressPercent');
     const progressText = document.getElementById('progressText');
@@ -344,11 +628,7 @@ function handleProgressUpdate(update) {
 
     } else if (update.type === 'complete') {
         // 상태 복구
-        runStartPending = false;
-        isRunning = false;
-        runRequestSent = false;
-        runCancelPending = false;
-        runCancelRequested = false;
+        finishTrackedRun(update.run_id);
         setCancelButtonState(false);
 
         // 버튼 복구
@@ -364,7 +644,9 @@ function handleProgressUpdate(update) {
         progressText.textContent = '완료!';
 
         addLogEntry('백업 작업이 완료되었습니다.', 'success');
-        showSummary(update.summary);
+        if (update.summary) {
+            showSummary(update.summary);
+        }
 
         // Reload backup history after completion
         if (typeof loadHistoryList === 'function') {
@@ -377,11 +659,7 @@ function handleProgressUpdate(update) {
         }
     } else if (update.type === 'error') {
         // 상태 복구
-        runStartPending = false;
-        isRunning = false;
-        runRequestSent = false;
-        runCancelPending = false;
-        runCancelRequested = false;
+        finishTrackedRun(update.run_id);
         setCancelButtonState(false);
 
         // 버튼 복구
@@ -394,8 +672,9 @@ function handleProgressUpdate(update) {
         // UI 초기화
         resetBackupUI('오류 발생');
 
-        addLogEntry('오류 발생: ' + update.error, 'error');
-        alert('오류: ' + update.error);
+        const errorMessage = update.error || '알 수 없는 오류';
+        addLogEntry('오류 발생: ' + errorMessage, 'error');
+        alert('오류: ' + errorMessage);
 
         if (ws) {
             ws.close();
@@ -403,11 +682,7 @@ function handleProgressUpdate(update) {
         }
     } else if (update.type === 'cancelled') {
         // 상태 복구
-        runStartPending = false;
-        isRunning = false;
-        runRequestSent = false;
-        runCancelPending = false;
-        runCancelRequested = false;
+        finishTrackedRun(update.run_id);
         setCancelButtonState(false);
 
         // 버튼 복구
@@ -435,6 +710,19 @@ function handleProgressUpdate(update) {
         }
     }
 }
+
+async function initializeRunTracking() {
+    const initializationRevision = runStateRevision;
+    try {
+        await connectWebSocket();
+    } catch (error) {
+        addLogEntry(`초기 WebSocket 연결 실패: ${error.message}`, 'warning');
+    }
+    if (initializationRevision !== runStateRevision) return;
+    await synchronizeRunStatus();
+}
+
+window.addEventListener('DOMContentLoaded', initializeRunTracking);
 
 // 파일 목록에 추가
 function addFileToList(filename, action) {
@@ -535,4 +823,10 @@ function showSummary(summary) {
     `;
 
     summarySection.style.display = 'block';
+
+	if (Array.isArray(summary.Warnings)) {
+		summary.Warnings.forEach((warning) => {
+			addLogEntry(`주의: ${String(warning)}`, 'warning');
+		});
+	}
 }

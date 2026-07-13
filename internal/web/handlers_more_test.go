@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/On-Jun9/ShutterPipe/internal/config"
 	"github.com/On-Jun9/ShutterPipe/pkg/types"
@@ -553,8 +552,6 @@ func TestHandleSaveUserDataHandlers_ReturnBadRequestOnInvalidJSON(t *testing.T) 
 // TestHandleRun_ReturnsStartedAndRunsPipeline는 테스트 코드 동작을 검증하거나 보조합니다.
 func TestHandleRun_ReturnsStartedAndRunsPipeline(t *testing.T) {
 	// 유효한 요청이면 /api/run은 즉시 started를 반환하고 백그라운드 실행해야 한다.
-	waitForRunMutexFree(t)
-
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", filepath.Join(tmpDir, "home"))
 
@@ -574,7 +571,7 @@ func TestHandleRun_ReturnsStartedAndRunsPipeline(t *testing.T) {
 	req := httptest.NewRequest(
 		http.MethodPost,
 		"/api/run",
-		strings.NewReader(`{"source":"`+sourceDir+`","dest":"`+destDir+`","include_extensions":["jpg"],"jobs":1,"dry_run":true}`),
+		strings.NewReader(`{"run_id":"requested-run","source":"`+sourceDir+`","dest":"`+destDir+`","include_extensions":["jpg"],"jobs":1,"dry_run":true}`),
 	)
 	rr := httptest.NewRecorder()
 
@@ -590,21 +587,9 @@ func TestHandleRun_ReturnsStartedAndRunsPipeline(t *testing.T) {
 	if body["status"] != "started" {
 		t.Fatalf("unexpected run response: %+v", body)
 	}
-
-	waitForRunMutexFree(t)
-}
-
-// waitForRunMutexFree는 테스트 코드 동작을 검증하거나 보조합니다.
-func waitForRunMutexFree(t *testing.T) {
-	t.Helper()
-
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if runMutex.TryLock() {
-			runMutex.Unlock()
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
+	if body["run_id"] != "requested-run" {
+		t.Fatalf("expected requested run ID, got %+v", body)
 	}
-	t.Fatal("timeout waiting for run mutex to be free")
+
+	waitForRunManagerInactive(t, s)
 }
