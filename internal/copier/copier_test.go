@@ -912,3 +912,51 @@ func TestMovePartNoReplaceInRootPreservesNoClobber(t *testing.T) {
 		t.Fatalf("기존 파일이 덮어써짐: data=%q err=%v", data, err)
 	}
 }
+
+// TestRenamePartNoClobberInRootFallback는 hard link 미지원 파일시스템(exFAT/FAT,
+// 일부 SMB)용 stat+rename 폴백의 no-clobber 동작을 검증한다. 대상이 비어 있으면
+// publish하고, 무엇이든 이미 있으면 덮어쓰지 않고 os.ErrExist로 충돌 처리에
+// 넘겨야 한다.
+func TestRenamePartNoClobberInRootFallback(t *testing.T) {
+	dir := t.TempDir()
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+
+	linkErr := errors.New("link not supported")
+
+	// 신규 대상: rename으로 publish된다.
+	if err := root.WriteFile(".photo.part", []byte("new"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := renamePartNoClobberInRoot(root, ".photo.part", "photo.jpg", linkErr); err != nil {
+		t.Fatalf("신규 대상 폴백 publish 실패: %v", err)
+	}
+	if data, err := root.ReadFile("photo.jpg"); err != nil || string(data) != "new" {
+		t.Fatalf("폴백 publish 내용 불일치: data=%q err=%v", data, err)
+	}
+	if _, err := root.Stat(".photo.part"); !os.IsNotExist(err) {
+		t.Fatalf("폴백 publish 후 part 파일이 남아 있음: %v", err)
+	}
+
+	// 기존 파일 존재: 덮어쓰지 않고 os.ErrExist를 반환해야 한다.
+	if err := root.WriteFile(".photo2.part", []byte("intruder"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := renamePartNoClobberInRoot(root, ".photo2.part", "photo.jpg", linkErr); !errors.Is(err, os.ErrExist) {
+		t.Fatalf("기존 파일이 있을 때 os.ErrExist를 기대했으나 got %v", err)
+	}
+	if data, err := root.ReadFile("photo.jpg"); err != nil || string(data) != "new" {
+		t.Fatalf("폴백이 기존 파일을 덮어씀: data=%q err=%v", data, err)
+	}
+
+	// dangling symlink도 "존재"로 취급해 rename이 엔트리를 대체하지 않아야 한다.
+	if err := os.Symlink("missing-target", filepath.Join(dir, "dangling.jpg")); err != nil {
+		t.Fatal(err)
+	}
+	if err := renamePartNoClobberInRoot(root, ".photo2.part", "dangling.jpg", linkErr); !errors.Is(err, os.ErrExist) {
+		t.Fatalf("dangling symlink 대상에서 os.ErrExist를 기대했으나 got %v", err)
+	}
+}

@@ -409,15 +409,40 @@ func commitWithUniqueNameInRoot(root *os.Root, rootPath, partPath string, task *
 	return fmt.Errorf("no available destination name for %s", basePath)
 }
 
+// movePartNoReplaceInRoot publishes partPath at finalDest without replacing an
+// existing file, preferring the atomic hard-link commit. Filesystems without
+// hard links (exFAT/FAT, some SMB shares) reject Link, so any non-EEXIST link
+// failure falls through to a stat-then-rename fallback instead of failing the
+// copy outright.
 func movePartNoReplaceInRoot(root *os.Root, partPath, finalDest string) error {
-	if err := root.Link(partPath, finalDest); err != nil {
-		return err
+	linkErr := root.Link(partPath, finalDest)
+	if linkErr == nil {
+		if err := root.Remove(partPath); err != nil {
+			rollbackErr := root.Remove(finalDest)
+			return errors.Join(err, rollbackErr)
+		}
+		return nil
 	}
-	if err := root.Remove(partPath); err != nil {
-		rollbackErr := root.Remove(finalDest)
-		return errors.Join(err, rollbackErr)
+	if errors.Is(linkErr, os.ErrExist) {
+		return linkErr
 	}
-	return nil
+	return renamePartNoClobberInRoot(root, partPath, finalDest, linkErr)
+}
+
+// renamePartNoClobberInRoot is the hard-link-less commit fallback. No-clobber
+// becomes best effort: the window between the existence check and the rename is
+// not atomic, which this local single-user tool accepts over failing every copy
+// on such filesystems. It reports os.ErrExist for anything already at finalDest
+// (Lstat, so even a dangling symlink defers to conflict handling), and joins a
+// stat failure with the original link error so a real fault (EACCES/EIO) is not
+// misattributed to a missing hard-link feature.
+func renamePartNoClobberInRoot(root *os.Root, partPath, finalDest string, linkErr error) error {
+	if _, err := root.Lstat(finalDest); err == nil {
+		return os.ErrExist
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return errors.Join(linkErr, err)
+	}
+	return root.Rename(partPath, finalDest)
 }
 
 func uniqueCommitCandidate(path string, index int) string {
