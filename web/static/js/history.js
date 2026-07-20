@@ -74,9 +74,9 @@ function renderHistoryList(entries) {
         const destPath = formatShortPath(config.dest);
 
         // Status icon and dry run badge
-        const statusIcon = status === 'success' ? '✓' : '✗';
-        const statusClass = status === 'success' ? 'status-success' : 'status-failed';
-        const statusText = status === 'success' ? '성공' : '실패';
+        const statusIcon = status === 'success' ? '✓' : (status === 'canceled' ? '■' : '✗');
+        const statusClass = status === 'success' ? 'status-success' : (status === 'canceled' ? 'status-canceled' : 'status-failed');
+        const statusText = status === 'success' ? '성공' : (status === 'canceled' ? '취소됨' : '실패');
         const dryRunBadge = config.dry_run ? '<span class="dry-run-badge">시뮬레이션</span>' : '';
 
         // Convert duration from nanoseconds to seconds

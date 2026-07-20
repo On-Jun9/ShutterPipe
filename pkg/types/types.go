@@ -48,6 +48,13 @@ type CopyTask struct {
 	Error string
 	// Action indicates what action was taken (copied, skipped, renamed, etc.).
 	Action CopyAction
+	// ConflictPolicy is retained through commit so a destination created after
+	// planning still follows the selected policy.
+	ConflictPolicy ConflictPolicy
+	// QuarantineDir is the commit-time fallback destination for quarantine.
+	QuarantineDir string
+	// DestinationRoot constrains commit paths after resolving existing symlinks.
+	DestinationRoot string
 }
 
 // TaskStatus represents the status of a copy task.
@@ -117,6 +124,9 @@ type RunSummary struct {
 	Duration       time.Duration
 	BytesCopied    int64
 	BytesPerSecond float64
+	// Warnings reports non-copy failures, such as state or history persistence
+	// errors, without misclassifying successfully copied files as failed.
+	Warnings []string
 }
 
 // ConfigPreset represents a saved configuration preset.
@@ -182,8 +192,9 @@ type Bookmarks struct {
 type BackupStatus string
 
 const (
-	BackupStatusSuccess BackupStatus = "success"
-	BackupStatusFailed  BackupStatus = "failed"
+	BackupStatusSuccess  BackupStatus = "success"
+	BackupStatusFailed   BackupStatus = "failed"
+	BackupStatusCanceled BackupStatus = "canceled"
 )
 
 // BackupConfig contains the configuration used for a backup operation.

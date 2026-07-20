@@ -3,12 +3,22 @@
 
 // WebSocket 연결
 let ws = null;
+let wsConnectPromise = null;
 
 // 백업 실행 상태
 let isRunning = false;
 let runStartPending = false;  // 백업 시작 중 (WS 연결 ~ API 요청 사이)
 let runRequestSent = false;  // /api/run 요청이 전송되어 서버 실행 여부가 불확실한 상태
 let hasShownCloseAlert = false;  // ws.onclose 중복 알림 방지
+let runCancelPending = false;  // 취소 요청 전송 중
+let runCancelRequested = false;  // 취소 요청 전송 완료 후 서버 응답 대기 중
+let currentRunId = null;  // 현재 UI가 추적 중인 서버 실행 ID
+let terminalRunId = null;  // terminal 이벤트를 처리한 마지막 실행 ID
+let runStateRevision = 0;  // 늦게 도착한 비동기 응답 무효화용 단조 증가 값
+let runStatus = 'idle';  // idle | running | cancelling
+let lastServerRevision = 0;  // 서버 snapshot/event의 단조 증가 revision
+let lastServerId = null;  // revision을 발행한 서버 프로세스 ID
+let retiredServerIds = new Set();  // 새 서버 확인 뒤 지연 도착한 이전 서버 이벤트 차단
 
 // 확장자 목록
 let includeExtensions = [

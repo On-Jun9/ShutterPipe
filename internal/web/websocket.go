@@ -3,21 +3,25 @@ package web
 import (
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 )
 
 var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool {
-		return true
-	},
+	CheckOrigin: isSameOriginRequest,
 }
+
+const websocketWriteTimeout = 10 * time.Second
 
 type Hub struct {
 	clients    map[*Client]bool
 	broadcast  chan []byte
 	register   chan *Client
 	unregister chan *Client
+	stop       chan struct{}
+	done       chan struct{}
+	stopOnce   sync.Once
 	mu         sync.RWMutex
 }
 
@@ -27,12 +31,23 @@ func NewHub() *Hub {
 		broadcast:  make(chan []byte, 256),
 		register:   make(chan *Client),
 		unregister: make(chan *Client),
+		stop:       make(chan struct{}),
+		done:       make(chan struct{}),
 	}
 }
 
 func (h *Hub) Run() {
+	defer close(h.done)
 	for {
 		select {
+		case <-h.stop:
+			h.mu.Lock()
+			for client := range h.clients {
+				delete(h.clients, client)
+				client.close()
+			}
+			h.mu.Unlock()
+			return
 		case client := <-h.register:
 			h.mu.Lock()
 			h.clients[client] = true
@@ -42,7 +57,7 @@ func (h *Hub) Run() {
 			h.mu.Lock()
 			if _, ok := h.clients[client]; ok {
 				delete(h.clients, client)
-				close(client.send)
+				client.close()
 			}
 			h.mu.Unlock()
 
@@ -53,8 +68,8 @@ func (h *Hub) Run() {
 				select {
 				case client.send <- message:
 				default:
-					close(client.send)
 					delete(h.clients, client)
+					client.close()
 				}
 			}
 			h.mu.Unlock()
@@ -62,16 +77,54 @@ func (h *Hub) Run() {
 	}
 }
 
+func (h *Hub) Shutdown() {
+	h.stopOnce.Do(func() { close(h.stop) })
+	<-h.done
+}
+
 type Client struct {
-	hub  *Hub
-	conn *websocket.Conn
-	send chan []byte
+	hub            *Hub
+	conn           *websocket.Conn
+	send           chan []byte
+	unregisterOnce sync.Once
+	closeOnce      sync.Once
+}
+
+func (c *Client) close() {
+	c.closeOnce.Do(func() {
+		close(c.send)
+		if c.conn != nil {
+			c.conn.Close()
+		}
+	})
+}
+
+func (c *Client) requestUnregister() {
+	c.unregisterOnce.Do(func() {
+		select {
+		case c.hub.unregister <- c:
+		case <-c.hub.stop:
+		}
+	})
+}
+
+func (c *Client) readPump() {
+	defer c.requestUnregister()
+
+	for {
+		if _, _, err := c.conn.ReadMessage(); err != nil {
+			return
+		}
+	}
 }
 
 func (c *Client) writePump() {
-	defer c.conn.Close()
+	defer c.requestUnregister()
 
 	for message := range c.send {
+		if err := c.conn.SetWriteDeadline(time.Now().Add(websocketWriteTimeout)); err != nil {
+			return
+		}
 		if err := c.conn.WriteMessage(websocket.TextMessage, message); err != nil {
 			return
 		}
@@ -90,7 +143,13 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		send: make(chan []byte, 256),
 	}
 
-	client.hub.register <- client
+	select {
+	case client.hub.register <- client:
+	case <-client.hub.stop:
+		conn.Close()
+		return
+	}
 
+	go client.readPump()
 	go client.writePump()
 }

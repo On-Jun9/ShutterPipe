@@ -16,6 +16,12 @@ type UserDataManager struct {
 	dataDir string
 }
 
+// RunLockPath returns the shared lock used to prevent the CLI and web server
+// from mutating backup state and history concurrently.
+func (m *UserDataManager) RunLockPath() string {
+	return filepath.Join(m.dataDir, "run.lock")
+}
+
 // validatePath checks for potentially malicious characters in paths.
 // Prevents XSS attacks by rejecting paths with HTML/script patterns.
 // Note: <> alone are allowed as they're valid in Unix filenames.

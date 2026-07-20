@@ -93,19 +93,181 @@ func TestConfigValidate_FillsDefaults(t *testing.T) {
 }
 
 // TestConfigValidate_NormalizesNegativeJobs는 테스트 코드 동작을 검증하거나 보조합니다.
-func TestConfigValidate_NormalizesNegativeJobs(t *testing.T) {
-	// 음수 jobs 값은 안전한 최소값(1)으로 정규화되어야 한다.
-	cfg := &Config{
-		Source: "/tmp/source",
-		Dest:   "/tmp/dest",
-		Jobs:   -2,
+func TestConfigValidate_RejectsJobsOutsideSupportedRange(t *testing.T) {
+	// UI와 서버는 동일하게 0(자동) 또는 1..32만 허용해야 한다.
+	for _, jobs := range []int{-2, 33, 1 << 20} {
+		cfg := &Config{
+			Source: "/tmp/source",
+			Dest:   "/tmp/dest",
+			Jobs:   jobs,
+		}
+
+		err := cfg.Validate()
+		var validationErr *ValidationError
+		if !errors.As(err, &validationErr) || validationErr.Field != "jobs" {
+			t.Fatalf("expected jobs ValidationError for %d, got %T %v", jobs, err, err)
+		}
+	}
+}
+
+func TestConfigValidate_RejectsUnknownEnums(t *testing.T) {
+	for _, tc := range []struct {
+		field string
+		set   func(*Config)
+	}{
+		{field: "conflict_policy", set: func(cfg *Config) { cfg.ConflictPolicy = "overwite" }},
+		{field: "dedup_method", set: func(cfg *Config) { cfg.DedupMethod = "sha" }},
+		{field: "organize_strategy", set: func(cfg *Config) { cfg.OrganizeStrategy = "calendar" }},
+	} {
+		t.Run(tc.field, func(t *testing.T) {
+			cfg := &Config{Source: "/tmp/source", Dest: "/tmp/dest"}
+			tc.set(cfg)
+			err := cfg.Validate()
+			var validationErr *ValidationError
+			if !errors.As(err, &validationErr) || validationErr.Field != tc.field {
+				t.Fatalf("expected %s ValidationError, got %T %v", tc.field, err, err)
+			}
+		})
+	}
+}
+
+func TestConfigValidate_AppliesMissingEnumDefaults(t *testing.T) {
+	cfg := &Config{Source: "/tmp/source", Dest: "/tmp/dest"}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ConflictPolicy != "skip" || cfg.DedupMethod != "name-size" || cfg.OrganizeStrategy != "date" {
+		t.Fatalf("missing enum defaults not applied: %+v", cfg)
+	}
+}
+
+func TestConfigValidate_RejectsInvalidDateRange(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		start string
+		end   string
+		field string
+	}{
+		{name: "invalid start", start: "2026-02-30", field: "date_filter_start"},
+		{name: "invalid end", end: "02/10/2026", field: "date_filter_end"},
+		{name: "reversed", start: "2026-02-10", end: "2026-02-01", field: "date_filter_end"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &Config{Source: "/tmp/source", Dest: "/tmp/dest", DateFilterStart: tc.start, DateFilterEnd: tc.end}
+			err := cfg.Validate()
+			var validationErr *ValidationError
+			if !errors.As(err, &validationErr) || validationErr.Field != tc.field {
+				t.Fatalf("expected %s ValidationError, got %T %v", tc.field, err, err)
+			}
+		})
+	}
+}
+
+func TestConfigValidate_RejectsDestinationSubdirEscape(t *testing.T) {
+	for _, tc := range []struct {
+		field string
+		value string
+	}{
+		{field: "unclassified_dir", value: "../../outside"},
+		{field: "quarantine_dir", value: filepath.Join("..", "outside")},
+		{field: "unclassified_dir", value: filepath.Join(string(filepath.Separator), "absolute")},
+	} {
+		t.Run(tc.field+"_"+filepath.Base(tc.value), func(t *testing.T) {
+			cfg := &Config{Source: "/tmp/source", Dest: "/tmp/dest"}
+			if tc.field == "unclassified_dir" {
+				cfg.UnclassifiedDir = tc.value
+			} else {
+				cfg.QuarantineDir = tc.value
+			}
+			err := cfg.Validate()
+			var validationErr *ValidationError
+			if !errors.As(err, &validationErr) || validationErr.Field != tc.field {
+				t.Fatalf("expected %s ValidationError, got %T %v", tc.field, err, err)
+			}
+		})
+	}
+}
+
+func TestConfigValidate_RejectsEventNamePathEscape(t *testing.T) {
+	for _, eventName := range []string{"../../../../outside", `..\..\outside`, "bad\x00name"} {
+		cfg := &Config{Source: "/tmp/source", Dest: "/tmp/dest", EventName: eventName}
+		err := cfg.Validate()
+		var validationErr *ValidationError
+		if !errors.As(err, &validationErr) || validationErr.Field != "event_name" {
+			t.Fatalf("expected event_name ValidationError for %q, got %T %v", eventName, err, err)
+		}
+	}
+}
+
+func TestConfigValidate_RejectsDestinationInsideSource(t *testing.T) {
+	tmpDir := t.TempDir()
+	source := filepath.Join(tmpDir, "photos")
+	if err := os.MkdirAll(source, 0755); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(tmpDir, "photos-alias")
+	if err := os.Symlink(source, alias); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
 	}
 
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("validate failed: %v", err)
+	for _, tc := range []struct {
+		name string
+		dest string
+	}{
+		{name: "same path", dest: source},
+		{name: "direct child", dest: filepath.Join(source, "backup")},
+		{name: "symlink resolved child", dest: filepath.Join(alias, "backup")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &Config{Source: source, Dest: tc.dest}
+			err := cfg.Validate()
+			var validationErr *ValidationError
+			if !errors.As(err, &validationErr) || validationErr.Field != "dest" {
+				t.Fatalf("expected dest ValidationError, got %T %v", err, err)
+			}
+		})
 	}
-	if cfg.Jobs != 1 {
-		t.Fatalf("expected jobs=1, got %d", cfg.Jobs)
+}
+
+func TestConfigValidate_AllowsDestinationOutsideSource(t *testing.T) {
+	tmpDir := t.TempDir()
+	source := filepath.Join(tmpDir, "photos")
+	dest := filepath.Join(tmpDir, "backup")
+	if err := os.MkdirAll(source, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := (&Config{Source: source, Dest: dest}).Validate(); err != nil {
+		t.Fatalf("valid sibling destination rejected: %v", err)
+	}
+}
+
+func TestConfigValidate_RejectsSourceInsideDestination(t *testing.T) {
+	tmpDir := t.TempDir()
+	dest := filepath.Join(tmpDir, "backup")
+	source := filepath.Join(dest, "2026", "07", "13")
+	if err := os.MkdirAll(source, 0755); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(tmpDir, "backup-alias")
+	if err := os.Symlink(dest, alias); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		source string
+		dest   string
+	}{
+		{name: "direct child source", source: source, dest: dest},
+		{name: "symlink resolved child source", source: filepath.Join(alias, "2026", "07", "13"), dest: dest},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := (&Config{Source: tc.source, Dest: tc.dest}).Validate()
+			var validationErr *ValidationError
+			if !errors.As(err, &validationErr) || validationErr.Field != "source" {
+				t.Fatalf("expected source ValidationError, got %T %v", err, err)
+			}
+		})
 	}
 }
 

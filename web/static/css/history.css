@@ -216,6 +216,11 @@
   color: #dc2626;
 }
 
+.history-status.status-canceled {
+  background: #e2e8f0;
+  color: #475569;
+}
+
 .dry-run-badge {
   font-size: 12px;
   font-weight: 600;

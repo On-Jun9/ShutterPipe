@@ -1,6 +1,8 @@
 package scanner
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -63,5 +65,47 @@ func TestScanner_Scan_ReturnsWalkErrorForMissingRoot(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Fatalf("expected no entries on walk error, got %d", len(entries))
+	}
+}
+
+// TestScanner_ScanWithContext_ReturnsCanceled는 테스트 코드 동작을 검증하거나 보조합니다.
+func TestScanner_ScanWithContext_ReturnsCanceled(t *testing.T) {
+	// 취소된 컨텍스트로 스캔하면 context.Canceled를 반환해야 한다.
+	tmpDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmpDir, "photo.jpg"), []byte("x"), 0644); err != nil {
+		t.Fatalf("failed to write test file: %v", err)
+	}
+
+	s := New([]string{"jpg"})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	entries, err := s.ScanWithContext(ctx, tmpDir)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("expected no entries on canceled context, got %d", len(entries))
+	}
+}
+
+func TestScanner_ScanReturnsEntryInfoError(t *testing.T) {
+	tmpDir := t.TempDir()
+	sourcePath := filepath.Join(tmpDir, "photo.jpg")
+	if err := os.WriteFile(sourcePath, []byte("photo"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	infoErr := errors.New("injected stat failure")
+	s := New([]string{"jpg"})
+	s.entryInfo = func(os.DirEntry) (os.FileInfo, error) {
+		return nil, infoErr
+	}
+
+	entries, err := s.Scan(tmpDir)
+	if !errors.Is(err, infoErr) {
+		t.Fatalf("expected source inspection error, got %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("failed source entry was silently included: %+v", entries)
 	}
 }

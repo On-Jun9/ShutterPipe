@@ -1,6 +1,7 @@
 package metadata
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -77,6 +78,73 @@ func TestXMLExtractor_NoXMLFile(t *testing.T) {
 	}
 	if meta.Error == "" {
 		t.Error("expected error message")
+	}
+}
+
+func TestSidecarIdentityIncludesActualPathAndContentHash(t *testing.T) {
+	tmpDir := t.TempDir()
+	videoPath := filepath.Join(tmpDir, "clip.mp4")
+	sidecarPath := filepath.Join(tmpDir, "clipM01.xml")
+	if err := os.WriteFile(videoPath, []byte("video"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sidecarPath, []byte("metadata"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	identity, ok, err := SidecarIdentity(context.Background(), types.FileEntry{
+		Path: videoPath, Name: "clip.mp4", Extension: "mp4", IsVideo: true,
+	})
+	if err != nil || !ok {
+		t.Fatalf("sidecar identity failed: ok=%v err=%v", ok, err)
+	}
+	if filepath.Base(identity.Path) != "clipM01.xml" {
+		t.Fatalf("sidecar identity lost actual directory-entry spelling: %q", identity.Path)
+	}
+	if identity.Hash == "" || identity.Size != int64(len("metadata")) {
+		t.Fatalf("sidecar identity omitted content identity: %+v", identity)
+	}
+}
+
+// TestExtractFromSidecarUsesIdentitySnapshot는 identity 캡처 후 sidecar 파일이
+// 교체되어도 분류가 identity와 같은 내용 스냅샷에서 이루어지는지 검증한다.
+// 파일을 다시 열면 state에는 이전 해시, 목적지 분류에는 이후 내용이 기록될 수 있다.
+func TestExtractFromSidecarUsesIdentitySnapshot(t *testing.T) {
+	tmpDir := t.TempDir()
+	videoPath := filepath.Join(tmpDir, "clip.mp4")
+	sidecarPath := filepath.Join(tmpDir, "clipM01.xml")
+	originalXML := `<?xml version="1.0"?>
+<NonRealTimeMeta xmlns="urn:schemas-professionalDisc:nonRealTimeMeta:ver.2.00">
+	<CreationDate value="2025-12-31T19:47:25+09:00"/>
+</NonRealTimeMeta>`
+	swappedXML := `<?xml version="1.0"?>
+<NonRealTimeMeta xmlns="urn:schemas-professionalDisc:nonRealTimeMeta:ver.2.00">
+	<CreationDate value="2026-06-15T08:00:00+09:00"/>
+</NonRealTimeMeta>`
+	if err := os.WriteFile(videoPath, []byte("video"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sidecarPath, []byte(originalXML), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	identity, ok, err := SidecarIdentity(context.Background(), types.FileEntry{
+		Path: videoPath, Name: "clip.mp4", Extension: "mp4", IsVideo: true,
+	})
+	if err != nil || !ok {
+		t.Fatalf("sidecar identity failed: ok=%v err=%v", ok, err)
+	}
+
+	// identity 캡처와 분류 사이에 sidecar가 교체되는 상황을 재현한다.
+	if err := os.WriteFile(sidecarPath, []byte(swappedXML), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	meta := ExtractFromSidecar(identity)
+	if meta.Error != "" {
+		t.Fatalf("unexpected extract error: %s", meta.Error)
+	}
+	if meta.CaptureTime == nil || meta.CaptureTime.Year() != 2025 {
+		t.Fatalf("classification did not use the identity snapshot: %+v", meta.CaptureTime)
 	}
 }
 

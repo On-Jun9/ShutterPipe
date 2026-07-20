@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"context"
 	"crypto/sha256"
 	"fmt"
 	"io"
@@ -18,6 +19,17 @@ func NewDedupChecker(method types.DedupMethod) *DedupChecker {
 }
 
 func (d *DedupChecker) IsDuplicate(src types.FileEntry, destPath string) (bool, error) {
+	return d.IsDuplicateWithContext(context.Background(), src, destPath)
+}
+
+func (d *DedupChecker) IsDuplicateWithContext(ctx context.Context, src types.FileEntry, destPath string) (bool, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+
 	destInfo, err := os.Stat(destPath)
 	if os.IsNotExist(err) {
 		return false, nil
@@ -30,12 +42,12 @@ func (d *DedupChecker) IsDuplicate(src types.FileEntry, destPath string) (bool, 
 		return src.Size == destInfo.Size(), nil
 	}
 
-	srcHash, err := hashFile(src.Path)
+	srcHash, err := hashFileWithContext(ctx, src.Path)
 	if err != nil {
 		return false, err
 	}
 
-	destHash, err := hashFile(destPath)
+	destHash, err := hashFileWithContext(ctx, destPath)
 	if err != nil {
 		return false, err
 	}
@@ -43,7 +55,11 @@ func (d *DedupChecker) IsDuplicate(src types.FileEntry, destPath string) (bool, 
 	return srcHash == destHash, nil
 }
 
-func hashFile(path string) (string, error) {
+func hashFileWithContext(ctx context.Context, path string) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	f, err := os.Open(path)
 	if err != nil {
 		return "", err
@@ -51,8 +67,25 @@ func hashFile(path string) (string, error) {
 	defer f.Close()
 
 	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
+	buf := make([]byte, 1024*1024)
+	for {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+
+		n, readErr := f.Read(buf)
+		if n > 0 {
+			if _, err := h.Write(buf[:n]); err != nil {
+				return "", err
+			}
+		}
+
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			return "", readErr
+		}
 	}
 
 	return fmt.Sprintf("%x", h.Sum(nil)), nil

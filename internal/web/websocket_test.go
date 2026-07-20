@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -99,6 +100,163 @@ func TestHandleWebSocket_UpgradeSuccessAndWritePumpDeliversMessage(t *testing.T)
 	if string(msg) != `{"type":"ping"}` {
 		t.Fatalf("unexpected websocket message: %s", string(msg))
 	}
+}
+
+func TestHandleWebSocket_ClientCloseImmediatelyUnregisters(t *testing.T) {
+	s := NewServer()
+
+	ts := httptest.NewServer(s.router)
+	defer ts.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/api/ws"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("failed to dial websocket: %v", err)
+	}
+
+	waitForHubClientCount(t, s.hub, 1)
+	s.hub.mu.RLock()
+	var serverClient *Client
+	for client := range s.hub.clients {
+		serverClient = client
+	}
+	s.hub.mu.RUnlock()
+	if serverClient == nil {
+		t.Fatal("expected registered server client")
+	}
+
+	if err := conn.Close(); err != nil {
+		t.Fatalf("failed to close websocket: %v", err)
+	}
+	waitForHubClientCount(t, s.hub, 0)
+
+	select {
+	case _, ok := <-serverClient.send:
+		if ok {
+			t.Fatal("expected hub to close client send channel")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for client send channel close")
+	}
+
+	// readPump과 writePump이 모두 종료된 뒤에도 unregister는 한 번만 요청되어야 한다.
+	serverClient.requestUnregister()
+}
+
+func TestClientRequestUnregisterSendsOnce(t *testing.T) {
+	h := NewHub()
+	h.unregister = make(chan *Client, 2)
+	client := &Client{
+		hub:  h,
+		send: make(chan []byte),
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			client.requestUnregister()
+		}()
+	}
+	wg.Wait()
+
+	select {
+	case got := <-h.unregister:
+		if got != client {
+			t.Fatalf("unexpected client: %p", got)
+		}
+	default:
+		t.Fatal("expected one unregister request")
+	}
+
+	select {
+	case <-h.unregister:
+		t.Fatal("expected unregister request to be sent only once")
+	default:
+	}
+}
+
+func TestHubShutdownClosesClientsAndPumpsCanUnregister(t *testing.T) {
+	h := NewHub()
+	go h.Run()
+	client := &Client{hub: h, send: make(chan []byte, 1)}
+	h.register <- client
+	waitForHubClientCount(t, h, 1)
+
+	h.Shutdown()
+	waitForHubClientCount(t, h, 0)
+	if _, ok := <-client.send; ok {
+		t.Fatal("expected client send channel to close during hub shutdown")
+	}
+
+	done := make(chan struct{})
+	go func() {
+		client.requestUnregister()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("client unregister blocked after hub shutdown")
+	}
+}
+
+func TestServerBroadcastAfterHubShutdownDoesNotBlock(t *testing.T) {
+	h := NewHub()
+	go h.Run()
+	h.Shutdown()
+	s := &Server{hub: h}
+
+	done := make(chan struct{})
+	go func() {
+		s.broadcastJSON(map[string]string{"type": "status"})
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("broadcast blocked after hub shutdown")
+	}
+}
+
+func TestHandleWebSocket_RejectsCrossOriginUpgrade(t *testing.T) {
+	s := NewServer()
+
+	ts := httptest.NewServer(s.router)
+	defer ts.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/api/ws"
+	headers := http.Header{}
+	headers.Set("Origin", "https://attacker.example")
+
+	conn, response, err := websocket.DefaultDialer.Dial(wsURL, headers)
+	if conn != nil {
+		conn.Close()
+	}
+	if err == nil {
+		t.Fatal("expected cross-origin websocket upgrade to fail")
+	}
+	if response == nil || response.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected status 403, got response=%v", response)
+	}
+}
+
+func TestHandleWebSocket_AllowsSameOriginUpgrade(t *testing.T) {
+	s := NewServer()
+
+	ts := httptest.NewServer(s.router)
+	defer ts.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/api/ws"
+	headers := http.Header{}
+	headers.Set("Origin", ts.URL)
+
+	conn, response, err := websocket.DefaultDialer.Dial(wsURL, headers)
+	if err != nil {
+		t.Fatalf("expected same-origin websocket upgrade to succeed, response=%v err=%v", response, err)
+	}
+	conn.Close()
 }
 
 // waitForHubClientCount는 테스트 코드 동작을 검증하거나 보조합니다.
