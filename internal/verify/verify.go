@@ -53,9 +53,18 @@ func (v *Verifier) VerifyWithContext(ctx context.Context, srcPath, destPath stri
 }
 
 func (v *Verifier) VerifyStagedWithContext(ctx context.Context, stagedPath string, expectedSize int64, expectedHash []byte) error {
-	info, err := os.Stat(stagedPath)
+	file, err := os.Open(stagedPath)
 	if err != nil {
 		return fmt.Errorf("staged file not found: %w", err)
+	}
+	defer file.Close()
+	return v.VerifyStagedFileWithContext(ctx, file, expectedSize, expectedHash)
+}
+
+func (v *Verifier) VerifyStagedFileWithContext(ctx context.Context, file *os.File, expectedSize int64, expectedHash []byte) error {
+	info, err := file.Stat()
+	if err != nil {
+		return fmt.Errorf("failed to stat staged file: %w", err)
 	}
 	if info.Size() != expectedSize {
 		return fmt.Errorf("size mismatch: expected %d, got %d", expectedSize, info.Size())
@@ -63,7 +72,10 @@ func (v *Verifier) VerifyStagedWithContext(ctx context.Context, stagedPath strin
 	if !v.hashVerify {
 		return nil
 	}
-	actualHash, err := hashFileBytesWithContext(ctx, stagedPath)
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("failed to rewind staged file: %w", err)
+	}
+	actualHash, err := hashReaderWithContext(ctx, file)
 	if err != nil {
 		return fmt.Errorf("failed to hash staged file: %w", err)
 	}
@@ -133,14 +145,17 @@ func hashFileBytesWithContext(ctx context.Context, path string) ([]byte, error) 
 		return nil, err
 	}
 	defer f.Close()
+	return hashReaderWithContext(ctx, f)
+}
 
+func hashReaderWithContext(ctx context.Context, r io.Reader) ([]byte, error) {
 	h := sha256.New()
 	buf := make([]byte, 1024*1024)
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		n, readErr := f.Read(buf)
+		n, readErr := r.Read(buf)
 		if n > 0 {
 			if _, err := h.Write(buf[:n]); err != nil {
 				return nil, err

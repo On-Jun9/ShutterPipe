@@ -2,6 +2,7 @@ package scanner
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,6 +17,7 @@ var videoExtensions = map[string]bool{
 
 type Scanner struct {
 	includeExt map[string]bool
+	entryInfo  func(os.DirEntry) (os.FileInfo, error)
 }
 
 func New(extensions []string) *Scanner {
@@ -23,7 +25,10 @@ func New(extensions []string) *Scanner {
 	for _, ext := range extensions {
 		extMap[strings.ToLower(ext)] = true
 	}
-	return &Scanner{includeExt: extMap}
+	return &Scanner{
+		includeExt: extMap,
+		entryInfo:  func(entry os.DirEntry) (os.FileInfo, error) { return entry.Info() },
+	}
 }
 
 func (s *Scanner) Scan(root string) ([]types.FileEntry, error) {
@@ -55,9 +60,13 @@ func (s *Scanner) ScanWithContext(ctx context.Context, root string) ([]types.Fil
 			return nil
 		}
 
-		info, err := d.Info()
+		entryInfo := s.entryInfo
+		if entryInfo == nil {
+			entryInfo = func(entry os.DirEntry) (os.FileInfo, error) { return entry.Info() }
+		}
+		info, err := entryInfo(d)
 		if err != nil {
-			return nil
+			return fmt.Errorf("failed to inspect source file %s: %w", path, err)
 		}
 
 		entries = append(entries, types.FileEntry{

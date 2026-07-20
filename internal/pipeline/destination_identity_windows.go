@@ -58,3 +58,7 @@ func canonicalOpenedPath(path string) (string, bool) {
 		buffer = make([]uint16, int(length)+1)
 	}
 }
+
+func newCanonicalOpenedPathResolver() func(string) (string, bool) {
+	return canonicalOpenedPath
+}

@@ -31,7 +31,7 @@ function hasObservedTerminalRun(serverId, runId) {
     const key = terminalObservationKey(serverId, runId);
     if (observedTerminalRuns.has(key)) return true;
     try {
-        return window.localStorage?.getItem(terminalObservationStorageKey) === key;
+        return window.sessionStorage?.getItem(terminalObservationStorageKey) === key;
     } catch (_error) {
         return false;
     }
@@ -42,7 +42,7 @@ function rememberTerminalRun(serverId, runId) {
     const key = terminalObservationKey(serverId, runId);
     observedTerminalRuns.add(key);
     try {
-        window.localStorage?.setItem(terminalObservationStorageKey, key);
+        window.sessionStorage?.setItem(terminalObservationStorageKey, key);
     } catch (_error) {
         // In-memory tracking still prevents repeat handling in this page.
     }
@@ -299,7 +299,7 @@ function ensureObserver(runId, options) {
 
 async function synchronizeRunStatus(expectedRunId = null, options = {}) {
     const requestedRevision = runStateRevision;
-    const result = await getBackupRunStatusFromServer();
+    const result = await getBackupRunStatusFromServer(expectedRunId);
     if (!result.success) {
         addLogEntry(`백업 상태 조회 실패: ${result.error || result.status}`, 'warning');
         return { resolved: false, result };
@@ -328,10 +328,10 @@ async function synchronizeRunStatus(expectedRunId = null, options = {}) {
             if (Number.isFinite(result.revision)) {
                 lastServerRevision = Math.max(lastServerRevision, result.revision);
             }
-            // 다른 탭이 이미 기록한 terminal이라 이벤트를 재생하지 않지만, 이 탭이
-            // 그 실행을 추적 중이었거나(currentRunId===runId) 추적 run 없이 실행 UI만
-            // 남아 있는 경우(예: 409에서 requested run을 정리해 currentRunId=null인데
-            // 시작 버튼이 잠긴 상태)에도 idle UI를 복원해야 계속 잠기지 않는다.
+            // 이 탭이 새로고침 전에 이미 처리한 terminal이라 이벤트를 재생하지 않지만,
+            // 그 실행을 다시 추적 중이거나(currentRunId===runId) 추적 run 없이 실행
+            // UI만 남아 있는 경우(예: 409에서 requested run을 정리해 currentRunId=null
+            // 인데 시작 버튼이 잠긴 상태)에도 idle UI를 복원해야 계속 잠기지 않는다.
             if (currentRunId === result.runId || (!currentRunId && !runStartPending)) {
                 finishTrackedRun(result.runId);
                 setCancelButtonState(false);
@@ -648,7 +648,7 @@ async function cancelBackup() {
     const cancelRunId = currentRunId;
 
     try {
-        const cancelResult = await cancelBackupRunOnServer(cancelRunId);
+        const cancelResult = await cancelBackupRunOnServer(cancelRunId, lastServerId);
         const statusText = cancelResult.status || 'NETWORK_ERROR';
         addLogEntry(`취소 요청 응답 수신: Status ${statusText}`, cancelResult.success ? 'warning' : 'error');
 

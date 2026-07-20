@@ -78,13 +78,6 @@ func (c *ConflictResolver) Resolve(task *types.CopyTask) Resolution {
 		if err != nil {
 			return Resolution{Err: fmt.Errorf("이름 변경 후보를 확인하지 못했습니다 %s: %w", task.DestPath, err)}
 		}
-		available, err := c.isAvailable(newPath)
-		if err != nil {
-			return Resolution{Err: fmt.Errorf("이름 변경 후보를 확인하지 못했습니다 %s: %w", newPath, err)}
-		}
-		if !available {
-			return Resolution{Action: types.CopyActionSkipped, Skip: true}
-		}
 		c.reserve(newPath, false)
 		return Resolution{Action: types.CopyActionRenamed, DestPath: newPath}
 
@@ -93,13 +86,6 @@ func (c *ConflictResolver) Resolve(task *types.CopyTask) Resolution {
 		quarantinePath, err := c.generateUniqueNameLocked(quarantinePath)
 		if err != nil {
 			return Resolution{Err: fmt.Errorf("격리 후보를 확인하지 못했습니다 %s: %w", quarantinePath, err)}
-		}
-		available, err := c.isAvailable(quarantinePath)
-		if err != nil {
-			return Resolution{Err: fmt.Errorf("격리 후보를 확인하지 못했습니다 %s: %w", quarantinePath, err)}
-		}
-		if !available {
-			return Resolution{Action: types.CopyActionSkipped, Skip: true}
 		}
 		c.reserve(quarantinePath, false)
 		return Resolution{Action: types.CopyActionQuarantined, DestPath: quarantinePath}
@@ -132,7 +118,10 @@ func (c *ConflictResolver) generateUniqueNameLocked(path string) (string, error)
 		}
 	}
 
-	return path, nil
+	// A backup tool must never report success without preserving the source.
+	// Returning the original conflicting path here would let the caller count
+	// the file as Skipped while nothing was copied.
+	return "", fmt.Errorf("사용 가능한 이름 후보가 없습니다 (%s_1~_9999 모두 사용 중)", strings.TrimSuffix(filepath.Base(path), ext))
 }
 
 // isAvailable reports whether path can be claimed. A stat error other than a

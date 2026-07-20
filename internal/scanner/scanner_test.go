@@ -88,3 +88,24 @@ func TestScanner_ScanWithContext_ReturnsCanceled(t *testing.T) {
 		t.Fatalf("expected no entries on canceled context, got %d", len(entries))
 	}
 }
+
+func TestScanner_ScanReturnsEntryInfoError(t *testing.T) {
+	tmpDir := t.TempDir()
+	sourcePath := filepath.Join(tmpDir, "photo.jpg")
+	if err := os.WriteFile(sourcePath, []byte("photo"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	infoErr := errors.New("injected stat failure")
+	s := New([]string{"jpg"})
+	s.entryInfo = func(os.DirEntry) (os.FileInfo, error) {
+		return nil, infoErr
+	}
+
+	entries, err := s.Scan(tmpDir)
+	if !errors.Is(err, infoErr) {
+		t.Fatalf("expected source inspection error, got %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("failed source entry was silently included: %+v", entries)
+	}
+}

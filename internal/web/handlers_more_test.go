@@ -580,15 +580,18 @@ func TestHandleRun_ReturnsStartedAndRunsPipeline(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected status 200, got %d", rr.Code)
 	}
-	var body map[string]string
+	var body StartRunResponse
 	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
 		t.Fatalf("failed to decode run response: %v", err)
 	}
-	if body["status"] != "started" {
+	if body.Status != "started" {
 		t.Fatalf("unexpected run response: %+v", body)
 	}
-	if body["run_id"] != "requested-run" {
+	if body.RunID != "requested-run" {
 		t.Fatalf("expected requested run ID, got %+v", body)
+	}
+	if body.ServerID == "" || body.Revision == 0 {
+		t.Fatalf("start response omitted server identity or revision: %+v", body)
 	}
 
 	waitForRunManagerInactive(t, s)

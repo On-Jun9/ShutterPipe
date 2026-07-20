@@ -130,18 +130,19 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	return nil
 }
 
-func (s *Server) startRun(runID string) (context.Context, context.CancelFunc, error) {
+func (s *Server) startRun(runID string) (context.Context, context.CancelFunc, RunStatusResponse, error) {
 	s.runLifecycleMu.Lock()
 	defer s.runLifecycleMu.Unlock()
 	if s.shuttingDown {
-		return nil, nil, http.ErrServerClosed
+		return nil, nil, RunStatusResponse{}, http.ErrServerClosed
 	}
 	runCtx, cancel := context.WithCancel(s.runContext())
-	if err := s.runs().TryStart(runID, cancel); err != nil {
+	status, err := s.runs().TryStart(runID, cancel)
+	if err != nil {
 		cancel()
-		return nil, nil, err
+		return nil, nil, status, err
 	}
-	return runCtx, cancel, nil
+	return runCtx, cancel, status, nil
 }
 
 func (s *Server) isShuttingDown() bool {

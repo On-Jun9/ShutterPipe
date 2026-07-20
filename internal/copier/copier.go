@@ -17,24 +17,24 @@ import (
 )
 
 type stagedVerifier interface {
-	VerifyStagedWithContext(context.Context, string, int64, []byte) error
+	VerifyStagedFileWithContext(context.Context, *os.File, int64, []byte) error
 }
 
 type Copier struct {
-	workers         int
-	dryRun          bool
-	hashVerify      bool
-	partFileFactory func(string) (*os.File, error)
-	verifier        stagedVerifier
+	workers                 int
+	dryRun                  bool
+	hashVerify              bool
+	partFileFactory         func(string) (*os.File, error)
+	beforeDestinationCreate func(types.CopyTask)
+	verifier                stagedVerifier
 }
 
 func New(workers int, dryRun, hashVerify bool) *Copier {
 	return &Copier{
-		workers:         workers,
-		dryRun:          dryRun,
-		hashVerify:      hashVerify,
-		partFileFactory: newPartFile,
-		verifier:        verify.New(hashVerify),
+		workers:    workers,
+		dryRun:     dryRun,
+		hashVerify: hashVerify,
+		verifier:   verify.New(hashVerify),
 	}
 }
 
@@ -119,29 +119,66 @@ func (c *Copier) copyOne(ctx context.Context, task types.CopyTask) CopyResult {
 		return CopyResult{Task: task}
 	}
 
-	if err := ensureDirWithinRoot(task.DestinationRoot, filepath.Dir(task.DestPath)); err != nil {
-		task.Status = types.TaskStatusFailed
-		task.Error = err.Error()
-		return CopyResult{Task: task, Error: err}
+	rootPath := task.DestinationRoot
+	if rootPath == "" {
+		rootPath = filepath.Dir(task.DestPath)
 	}
-
-	partFileFactory := c.partFileFactory
-	if partFileFactory == nil {
-		partFileFactory = newPartFile
-	}
-	partFile, err := partFileFactory(task.DestPath)
+	rootPath, err := filepath.Abs(rootPath)
 	if err != nil {
 		task.Status = types.TaskStatusFailed
 		task.Error = err.Error()
 		return CopyResult{Task: task, Error: err}
 	}
-	partPath := partFile.Name()
+	if err := os.MkdirAll(rootPath, 0755); err != nil {
+		task.Status = types.TaskStatusFailed
+		task.Error = err.Error()
+		return CopyResult{Task: task, Error: err}
+	}
+	destRoot, err := os.OpenRoot(rootPath)
+	if err != nil {
+		task.Status = types.TaskStatusFailed
+		task.Error = err.Error()
+		return CopyResult{Task: task, Error: err}
+	}
+	defer destRoot.Close()
+	destRel, err := relativeDestinationPath(rootPath, task.DestPath)
+	if err != nil {
+		task.Status = types.TaskStatusFailed
+		task.Error = err.Error()
+		return CopyResult{Task: task, Error: err}
+	}
+	if c.beforeDestinationCreate != nil {
+		c.beforeDestinationCreate(task)
+	}
+	if err := destRoot.MkdirAll(filepath.Dir(destRel), 0755); err != nil {
+		err = fmt.Errorf("destination path escapes configured root or cannot be created: %s: %w", task.DestPath, err)
+		task.Status = types.TaskStatusFailed
+		task.Error = err.Error()
+		return CopyResult{Task: task, Error: err}
+	}
+
+	var partFile *os.File
+	var partRel string
+	if c.partFileFactory != nil {
+		partFile, err = c.partFileFactory(task.DestPath)
+		if err == nil {
+			partRel, err = relativeDestinationPath(rootPath, partFile.Name())
+		}
+	} else {
+		partFile, partRel, err = newPartFileInRoot(destRoot, destRel)
+	}
+	if err != nil {
+		if partFile != nil {
+			_ = partFile.Close()
+		}
+		task.Status = types.TaskStatusFailed
+		task.Error = err.Error()
+		return CopyResult{Task: task, Error: err}
+	}
 
 	sourceHash, warning, err := c.copyToPart(ctx, task.Source, partFile)
 	if err != nil {
-		if cleanupErr := os.Remove(partPath); cleanupErr != nil && !errors.Is(cleanupErr, os.ErrNotExist) {
-			err = errors.Join(err, cleanupErr)
-		}
+		err = joinRootCleanupError(destRoot, partRel, err)
 		task.Status = types.TaskStatusFailed
 		task.Error = err.Error()
 		return CopyResult{Task: task, Error: err}
@@ -150,38 +187,40 @@ func (c *Copier) copyOne(ctx context.Context, task types.CopyTask) CopyResult {
 	if verifier == nil {
 		verifier = verify.New(c.hashVerify)
 	}
-	if err := verifier.VerifyStagedWithContext(ctx, partPath, task.Source.Size, sourceHash); err != nil {
-		if cleanupErr := os.Remove(partPath); cleanupErr != nil && !errors.Is(cleanupErr, os.ErrNotExist) {
-			err = errors.Join(err, cleanupErr)
-		}
+	stagedFile, err := destRoot.Open(partRel)
+	if err != nil {
+		err = joinRootCleanupError(destRoot, partRel, err)
+		task.Status = types.TaskStatusFailed
+		task.Error = err.Error()
+		return CopyResult{Task: task, Error: err}
+	}
+	verifyErr := verifier.VerifyStagedFileWithContext(ctx, stagedFile, task.Source.Size, sourceHash)
+	closeErr := stagedFile.Close()
+	if verifyErr != nil || closeErr != nil {
+		err = errors.Join(verifyErr, closeErr)
+		err = joinRootCleanupError(destRoot, partRel, err)
 		task.Status = types.TaskStatusFailed
 		task.Error = err.Error()
 		return CopyResult{Task: task, Error: err}
 	}
 	if c.hashVerify {
 		if err := verify.New(true).VerifySourceHashWithContext(ctx, task.Source.Path, sourceHash); err != nil {
-			if cleanupErr := os.Remove(partPath); cleanupErr != nil && !errors.Is(cleanupErr, os.ErrNotExist) {
-				err = errors.Join(err, cleanupErr)
-			}
+			err = joinRootCleanupError(destRoot, partRel, err)
 			task.Status = types.TaskStatusFailed
 			task.Error = err.Error()
 			return CopyResult{Task: task, Error: err}
 		}
 	}
 	if err := ctx.Err(); err != nil {
-		if cleanupErr := os.Remove(partPath); cleanupErr != nil && !errors.Is(cleanupErr, os.ErrNotExist) {
-			err = errors.Join(err, cleanupErr)
-		}
+		err = joinRootCleanupError(destRoot, partRel, err)
 		task.Status = types.TaskStatusFailed
 		task.Error = err.Error()
 		return CopyResult{Task: task, Error: err}
 	}
 
-	skipped, err := commitTask(partPath, &task)
+	skipped, err := commitTaskInRoot(destRoot, rootPath, partRel, destRel, &task)
 	if err != nil {
-		if cleanupErr := os.Remove(partPath); cleanupErr != nil && !errors.Is(cleanupErr, os.ErrNotExist) {
-			err = errors.Join(err, cleanupErr)
-		}
+		err = joinRootCleanupError(destRoot, partRel, err)
 		task.Status = types.TaskStatusFailed
 		task.Error = err.Error()
 		return CopyResult{Task: task, Error: err}
@@ -194,24 +233,43 @@ func (c *Copier) copyOne(ctx context.Context, task types.CopyTask) CopyResult {
 	return CopyResult{Task: task, VerifiedSourceHash: append([]byte(nil), sourceHash...), Warning: warning}
 }
 
-func newPartFile(finalDest string) (*os.File, error) {
+func newPartFileInRoot(root *os.Root, finalDest string) (*os.File, string, error) {
 	dir := filepath.Dir(finalDest)
 	base := filepath.Base(finalDest)
 	for attempt := 0; attempt < 100; attempt++ {
 		var suffix [8]byte
 		if _, err := rand.Read(suffix[:]); err != nil {
-			return nil, fmt.Errorf("failed to generate temporary filename: %w", err)
+			return nil, "", fmt.Errorf("failed to generate temporary filename: %w", err)
 		}
 		partPath := filepath.Join(dir, fmt.Sprintf(".%s.%x.part", base, suffix))
-		file, err := os.OpenFile(partPath, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0666)
+		file, err := root.OpenFile(partPath, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0666)
 		if err == nil {
-			return file, nil
+			return file, partPath, nil
 		}
 		if !errors.Is(err, os.ErrExist) {
-			return nil, err
+			return nil, "", err
 		}
 	}
-	return nil, fmt.Errorf("failed to allocate temporary file for %s", finalDest)
+	return nil, "", fmt.Errorf("failed to allocate temporary file for %s", finalDest)
+}
+
+func relativeDestinationPath(rootPath, path string) (string, error) {
+	pathAbs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	rel, err := filepath.Rel(rootPath, pathAbs)
+	if err != nil || filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("destination path escapes configured root: %s", path)
+	}
+	return rel, nil
+}
+
+func joinRootCleanupError(root *os.Root, partPath string, original error) error {
+	if cleanupErr := root.Remove(partPath); cleanupErr != nil && !errors.Is(cleanupErr, os.ErrNotExist) {
+		return errors.Join(original, cleanupErr)
+	}
+	return original
 }
 
 func (c *Copier) copyToPart(ctx context.Context, source types.FileEntry, dstFile *os.File) ([]byte, string, error) {
@@ -230,7 +288,6 @@ func (c *Copier) copyToPart(ctx context.Context, source types.FileEntry, dstFile
 		dstFile.Close()
 		return nil, "", fmt.Errorf("source changed since scan: %s", source.Path)
 	}
-	partDest := dstFile.Name()
 	hasher := sha256.New()
 
 	buf := make([]byte, 1024*1024)
@@ -277,17 +334,12 @@ func (c *Copier) copyToPart(ctx context.Context, source types.FileEntry, dstFile
 		return nil, "", fmt.Errorf("source changed during copy: %s", source.Path)
 	}
 
-	if err := dstFile.Close(); err != nil {
-		return nil, "", err
-	}
-
-	// Preserve modification time. The bytes are already safely staged, so a
-	// failure here (e.g. a NAS that rejects timestamp updates) is surfaced as a
-	// warning rather than failing the copy — but it must not be reported as a
-	// clean success.
 	var warning string
-	if err := os.Chtimes(partDest, before.ModTime(), before.ModTime()); err != nil {
+	if err := setFileTimes(dstFile, before.ModTime()); err != nil {
 		warning = fmt.Sprintf("수정 시각을 보존하지 못했습니다 %s: %v", source.Path, err)
+	}
+	if err := dstFile.Close(); err != nil {
+		return nil, warning, err
 	}
 
 	if !c.hashVerify {
@@ -296,147 +348,59 @@ func (c *Copier) copyToPart(ctx context.Context, source types.FileEntry, dstFile
 	return hasher.Sum(nil), warning, nil
 }
 
-func commitTask(partPath string, task *types.CopyTask) (bool, error) {
-	// Overwrite policy publishes with a plain replace whether or not the
-	// destination already exists. Its clobbering semantics are intended, and this
-	// is the only publish path that works on filesystems without an atomic
-	// no-replace primitive (exFAT/FAT) — which is why it is the documented
-	// fallback there. The scan-order-serialized single worker keeps it race-free.
-	// Upgrade the action to Overwritten when the destination exists at commit
-	// time (it may have appeared after planning) so run summary counters stay
-	// correct; the replace itself is safe either way.
+func commitTaskInRoot(root *os.Root, rootPath, partPath, destPath string, task *types.CopyTask) (bool, error) {
 	if task.ConflictPolicy == types.ConflictPolicyOverwrite {
-		if _, statErr := os.Stat(task.DestPath); statErr == nil {
+		if _, statErr := root.Stat(destPath); statErr == nil {
 			task.Action = types.CopyActionOverwritten
-		} else if !os.IsNotExist(statErr) {
+		} else if !errors.Is(statErr, os.ErrNotExist) {
 			return false, statErr
 		}
-		return false, replaceFile(partPath, task.DestPath)
+		return false, root.Rename(partPath, destPath)
 	}
 
-	if err := movePartNoReplace(partPath, task.DestPath); err == nil {
+	if err := movePartNoReplaceInRoot(root, partPath, destPath); err == nil {
 		return false, nil
 	} else if !errors.Is(err, os.ErrExist) {
 		return false, err
 	}
 
-	// Overwrite is handled above before the no-replace attempt, so it never
-	// reaches this conflict switch.
 	switch task.ConflictPolicy {
 	case types.ConflictPolicySkip:
-		if err := os.Remove(partPath); err != nil {
+		if err := root.Remove(partPath); err != nil {
 			return false, err
 		}
 		task.Action = types.CopyActionSkipped
 		return true, nil
-
 	case types.ConflictPolicyRename:
 		task.Action = types.CopyActionRenamed
-		return false, commitWithUniqueName(partPath, task, task.DestPath)
-
+		return false, commitWithUniqueNameInRoot(root, rootPath, partPath, task, destPath)
 	case types.ConflictPolicyQuarantine:
-		if err := ensureDirWithinRoot(task.DestinationRoot, task.QuarantineDir); err != nil {
+		quarantinePath, err := relativeDestinationPath(rootPath, task.QuarantineDir)
+		if err != nil {
 			return false, err
 		}
-		quarantineDest := filepath.Join(task.QuarantineDir, task.Source.Name)
+		if err := root.MkdirAll(quarantinePath, 0755); err != nil {
+			return false, fmt.Errorf("quarantine path escapes configured root or cannot be created: %s: %w", task.QuarantineDir, err)
+		}
+		quarantineDest := filepath.Join(quarantinePath, task.Source.Name)
 		task.Action = types.CopyActionQuarantined
-		if err := movePartNoReplace(partPath, quarantineDest); err == nil {
-			task.DestPath = quarantineDest
+		if err := movePartNoReplaceInRoot(root, partPath, quarantineDest); err == nil {
+			task.DestPath = filepath.Join(rootPath, quarantineDest)
 			return false, nil
 		} else if !errors.Is(err, os.ErrExist) {
 			return false, err
 		}
-		return false, commitWithUniqueName(partPath, task, quarantineDest)
-
+		return false, commitWithUniqueNameInRoot(root, rootPath, partPath, task, quarantineDest)
 	default:
 		return false, os.ErrExist
 	}
 }
 
-func ensureDirWithinRoot(root, path string) error {
-	if root == "" {
-		return os.MkdirAll(path, 0755)
-	}
-	rootAbs, err := filepath.Abs(root)
-	if err != nil {
-		return fmt.Errorf("failed to resolve destination root: %w", err)
-	}
-	pathAbs, err := filepath.Abs(path)
-	if err != nil {
-		return fmt.Errorf("failed to resolve destination path: %w", err)
-	}
-	rel, err := filepath.Rel(rootAbs, pathAbs)
-	if err != nil || filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return fmt.Errorf("destination path escapes configured root: %s", path)
-	}
-
-	// Creating the configured root itself is authorized. Descendants are then
-	// created one component at a time, validating every existing symlink before
-	// any deeper directory can be created through it.
-	if err := os.MkdirAll(rootAbs, 0755); err != nil {
-		return err
-	}
-	if err := ensureResolvedWithinRoot(rootAbs, rootAbs); err != nil {
-		return err
-	}
-	if rel == "." {
-		return nil
-	}
-
-	current := rootAbs
-	for _, component := range strings.Split(rel, string(filepath.Separator)) {
-		if component == "" || component == "." {
-			continue
-		}
-		current = filepath.Join(current, component)
-		info, statErr := os.Lstat(current)
-		if os.IsNotExist(statErr) {
-			if mkdirErr := os.Mkdir(current, 0755); mkdirErr != nil && !errors.Is(mkdirErr, os.ErrExist) {
-				return mkdirErr
-			}
-		} else if statErr != nil {
-			return statErr
-		} else if info.Mode().IsRegular() {
-			return fmt.Errorf("destination path component is not a directory: %s", current)
-		}
-		if err := ensureResolvedWithinRoot(rootAbs, current); err != nil {
-			return err
-		}
-		resolvedInfo, statErr := os.Stat(current)
-		if statErr != nil {
-			return statErr
-		}
-		if !resolvedInfo.IsDir() {
-			return fmt.Errorf("destination path component is not a directory: %s", current)
-		}
-	}
-	return nil
-}
-
-func ensureResolvedWithinRoot(root, path string) error {
-	if root == "" {
-		return nil
-	}
-	resolvedRoot, err := filepath.EvalSymlinks(root)
-	if err != nil {
-		return fmt.Errorf("failed to resolve destination root: %w", err)
-	}
-	resolvedPath, err := filepath.EvalSymlinks(path)
-	if err != nil {
-		return fmt.Errorf("failed to resolve destination path: %w", err)
-	}
-	rel, err := filepath.Rel(resolvedRoot, resolvedPath)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return fmt.Errorf("destination path escapes configured root: %s", path)
-	}
-	return nil
-}
-
-func commitWithUniqueName(partPath string, task *types.CopyTask, basePath string) error {
+func commitWithUniqueNameInRoot(root *os.Root, rootPath, partPath string, task *types.CopyTask, basePath string) error {
 	for i := 1; i < 10000; i++ {
 		candidate := uniqueCommitCandidate(basePath, i)
-		if err := movePartNoReplace(partPath, candidate); err == nil {
-			task.DestPath = candidate
+		if err := movePartNoReplaceInRoot(root, partPath, candidate); err == nil {
+			task.DestPath = filepath.Join(rootPath, candidate)
 			return nil
 		} else if !errors.Is(err, os.ErrExist) {
 			return err
@@ -445,28 +409,15 @@ func commitWithUniqueName(partPath string, task *types.CopyTask, basePath string
 	return fmt.Errorf("no available destination name for %s", basePath)
 }
 
-func movePartNoReplace(partPath, finalDest string) error {
-	if err := renameNoReplace(partPath, finalDest); err == nil || errors.Is(err, os.ErrExist) {
+func movePartNoReplaceInRoot(root *os.Root, partPath, finalDest string) error {
+	if err := root.Link(partPath, finalDest); err != nil {
 		return err
 	}
-
-	// Some filesystems do not implement the platform's exclusive rename. A
-	// same-directory hard link still publishes the completed part atomically.
-	if linkErr := os.Link(partPath, finalDest); linkErr == nil {
-		if removeErr := os.Remove(partPath); removeErr != nil {
-			rollbackErr := os.Remove(finalDest)
-			return errors.Join(removeErr, rollbackErr)
-		}
-		return nil
-	} else if errors.Is(linkErr, os.ErrExist) {
-		return linkErr
-	} else {
-		// exFAT/FAT and some SMB shares support neither an exclusive rename nor
-		// hard links. There is no primitive that provides both no-clobber and a
-		// crash-safe atomic publish on such filesystems, so fail safely rather
-		// than risk clobbering an existing file or leaving a truncated one.
-		return fmt.Errorf("destination filesystem does not support atomic no-replace commit: %w", linkErr)
+	if err := root.Remove(partPath); err != nil {
+		rollbackErr := root.Remove(finalDest)
+		return errors.Join(err, rollbackErr)
 	}
+	return nil
 }
 
 func uniqueCommitCandidate(path string, index int) string {

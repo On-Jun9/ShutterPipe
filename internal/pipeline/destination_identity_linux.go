@@ -27,3 +27,7 @@ func canonicalOpenedPath(path string) (string, bool) {
 	}
 	return canonical, true
 }
+
+func newCanonicalOpenedPathResolver() func(string) (string, bool) {
+	return canonicalOpenedPath
+}

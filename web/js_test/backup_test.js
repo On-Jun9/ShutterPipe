@@ -24,7 +24,7 @@ test.afterEach(() => {
     createdContexts.length = 0;
 });
 
-function createContext(localStorage = null) {
+function createContext(sessionStorage = null, localStorage = null) {
     const elements = new Map();
     const getElement = (id) => {
         if (!elements.has(id)) {
@@ -57,6 +57,7 @@ function createContext(localStorage = null) {
         window: {
             addEventListener() {},
             location: { host: 'localhost:8080', protocol: 'http:' },
+            sessionStorage,
             localStorage
         }
     });
@@ -607,7 +608,7 @@ test('a delayed old-server WebSocket event cannot bounce the server epoch backwa
 test('run API helpers preserve run IDs in requests and responses', async () => {
     const requests = [];
     const responses = [
-        { status: 200, body: { status: 'started', run_id: 'run-start', server_id: 'server-1' } },
+        { status: 200, body: { status: 'started', run_id: 'run-start', server_id: 'server-1', revision: 6 } },
         { status: 200, body: { status: 'cancelling', run_id: 'run-start', server_id: 'server-1', revision: 7 } },
         { status: 200, body: { status: 'complete', run_id: 'run-start', server_id: 'server-1', summary: { Copied: 1 }, revision: 8 } }
     ];
@@ -629,22 +630,23 @@ test('run API helpers preserve run IDs in requests and responses', async () => {
     vm.runInContext(userDataApiSource, apiContext);
 
     const start = await vm.runInContext(`startBackupRunOnServer({ source: '/a', run_id: 'run-start' })`, apiContext);
-    const cancel = await vm.runInContext(`cancelBackupRunOnServer('run-start')`, apiContext);
-    const status = await vm.runInContext('getBackupRunStatusFromServer()', apiContext);
+    const cancel = await vm.runInContext(`cancelBackupRunOnServer('run-start', 'server-1')`, apiContext);
+    const status = await vm.runInContext(`getBackupRunStatusFromServer('run-start')`, apiContext);
 
     assert.equal(start.runId, 'run-start');
 	assert.equal(start.serverId, 'server-1');
+    assert.equal(start.revision, 6);
     assert.deepEqual(JSON.parse(requests[0].options.body), { source: '/a', run_id: 'run-start' });
     assert.equal(cancel.runId, 'run-start');
 	assert.equal(cancel.runStatus, 'cancelling');
 	assert.equal(cancel.revision, 7);
-    assert.deepEqual(JSON.parse(requests[1].options.body), { run_id: 'run-start' });
+    assert.deepEqual(JSON.parse(requests[1].options.body), { run_id: 'run-start', server_id: 'server-1' });
     assert.equal(status.runStatus, 'complete');
     assert.equal(status.runId, 'run-start');
     assert.deepEqual(status.summary, { Copied: 1 });
     assert.equal(status.revision, 8);
 	assert.equal(status.serverId, 'server-1');
-    assert.equal(requests[2].url, '/api/run/status');
+    assert.equal(requests[2].url, '/api/run/status?run_id=run-start');
 });
 
 test('cancel API helper refuses an ID-less request before fetch', async () => {
@@ -665,6 +667,26 @@ test('cancel API helper refuses an ID-less request before fetch', async () => {
     assert.equal(result.status, 400);
     assert.equal(result.error, 'run_id is required');
 	assert.equal(fetchCalled, false);
+});
+
+test('cancel API helper refuses a server-ID-less request before fetch', async () => {
+    let fetchCalled = false;
+    const apiContext = vm.createContext({
+        console,
+        document: { addEventListener() {}, readyState: 'loading' },
+        fetch: async () => {
+            fetchCalled = true;
+            throw new Error('must not fetch');
+        }
+    });
+    vm.runInContext(userDataApiSource, apiContext);
+
+    const result = await vm.runInContext(`cancelBackupRunOnServer('run-start')`, apiContext);
+
+    assert.equal(result.success, false);
+    assert.equal(result.status, 400);
+    assert.equal(result.error, 'server_id is required');
+    assert.equal(fetchCalled, false);
 });
 
 test('run API helpers time out requests that never settle', async () => {
@@ -702,7 +724,7 @@ test('run API helpers time out requests that never settle', async () => {
 
     const results = await Promise.all([
         vm.runInContext(`startBackupRunOnServer({ run_id: 'start-timeout' })`, apiContext),
-        vm.runInContext(`cancelBackupRunOnServer('cancel-timeout')`, apiContext),
+        vm.runInContext(`cancelBackupRunOnServer('cancel-timeout', 'server-1')`, apiContext),
         vm.runInContext('getBackupRunStatusFromServer()', apiContext)
     ]);
 
@@ -974,14 +996,14 @@ test('start 409 with a terminal arriving during status query does not revive the
     assert.equal(getElement('startBtn').disabled, false);
 });
 
-test('observed terminal from another tab cleans up this tab tracking run', async () => {
+test('terminal observed in another tab is still rendered in this tab', async () => {
     const map = new Map();
     const localStorage = {
         getItem: (k) => (map.has(k) ? map.get(k) : null),
         setItem: (k, v) => { map.set(k, String(v)); }
     };
     localStorage.setItem('shutterpipe.lastObservedTerminal', 'server-1:run-1');
-    const { context, getElement } = createContext(localStorage);
+    const { context, getElement } = createContext(null, localStorage);
     context.getBackupRunStatusFromServer = async () => ({
         success: true, status: 200, runStatus: 'complete', runId: 'run-1', serverId: 'server-1', revision: 5,
         summary: { Duration: 0, BytesCopied: 0, BytesPerSecond: 0, ScannedFiles: 0, TotalFiles: 0,
@@ -992,10 +1014,12 @@ test('observed terminal from another tab cleans up this tab tracking run', async
 
     await vm.runInContext('synchronizeRunStatus()', context);
 
-    // 다른 탭이 기록한 terminal을 발견하면 이 탭의 추적 실행/UI도 정리되어야 한다.
+    // localStorage의 다른 탭 marker는 이 탭의 terminal 결과를 숨기지 않아야 한다.
     assert.equal(vm.runInContext('isRunning', context), false);
     assert.equal(vm.runInContext('currentRunId', context), null);
     assert.equal(getElement('startBtn').disabled, false);
+    assert.equal(getElement('progressText').textContent, '완료!');
+    assert.equal(getElement('summarySection').style.display, 'block');
 });
 
 test('cancel without WebSocket converges to terminal via bounded status polling', async () => {
@@ -1404,14 +1428,14 @@ test('uncertain start with an open WebSocket converges when the server is idle',
     assert.equal(getElement('startBtn').disabled, false);
 });
 
-test('observed terminal with no tracked run restores the start button (409 + cross-tab terminal)', async () => {
+test('cross-tab terminal marker does not suppress a 409 recovery result', async () => {
     const map = new Map();
     const localStorage = {
         getItem: (k) => (map.has(k) ? map.get(k) : null),
         setItem: (k, v) => { map.set(k, String(v)); }
     };
     localStorage.setItem('shutterpipe.lastObservedTerminal', 'server-1:run-A');
-    const { context, getElement } = createContext(localStorage);
+    const { context, getElement } = createContext(null, localStorage);
     context.getBackupRunStatusFromServer = async () => ({
         success: true, status: 200, runStatus: 'complete', runId: 'run-A', serverId: 'server-1', revision: 5,
         summary: zeroSummary
@@ -1422,7 +1446,8 @@ test('observed terminal with no tracked run restores the start button (409 + cro
 
     await vm.runInContext('synchronizeRunStatus(null, { observe: true })', context);
 
-    // 다른 탭이 이미 기록한 terminal이라도 추적 run이 없으면 idle UI를 복원해야 한다.
+    // 다른 탭 marker와 무관하게 이 탭도 terminal을 처리하고 idle UI를 복원해야 한다.
     assert.equal(getElement('startBtn').disabled, false);
     assert.equal(vm.runInContext('currentRunId', context), null);
+    assert.equal(getElement('progressText').textContent, '완료!');
 });

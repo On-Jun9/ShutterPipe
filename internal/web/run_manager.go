@@ -45,46 +45,75 @@ type activeRun struct {
 }
 
 type RunManager struct {
-	mu       sync.Mutex
-	active   *activeRun
-	terminal *RunStatusResponse
-	revision uint64
-	usedIDs  map[string]struct{}
+	mu            sync.Mutex
+	active        *activeRun
+	terminal      *RunStatusResponse
+	terminals     map[string]RunStatusResponse
+	terminalOrder []string
+	revision      uint64
+	// usedIDs deliberately grows for the server's lifetime. Evicting old IDs
+	// would let a reused run_id match a delayed cancel from the evicted run.
+	// Runs are user-initiated and an ID is ~tens of bytes, so unbounded growth
+	// is negligible for this tool; the absolute no-reuse guarantee is not.
+	usedIDs map[string]struct{}
 }
 
+const retainedTerminalRuns = 64
+
 func NewRunManager() *RunManager {
-	return &RunManager{usedIDs: make(map[string]struct{})}
+	return &RunManager{
+		terminals: make(map[string]RunStatusResponse),
+		usedIDs:   make(map[string]struct{}),
+	}
 }
 
 func (m *RunManager) Start(runID string, cancel func()) bool {
-	return m.TryStart(runID, cancel) == nil
+	_, err := m.TryStart(runID, cancel)
+	return err == nil
 }
 
-func (m *RunManager) TryStart(runID string, cancel func()) error {
+func (m *RunManager) TryStart(runID string, cancel func()) (RunStatusResponse, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.active != nil {
-		return ErrRunAlreadyActive
+		return m.statusLocked(), ErrRunAlreadyActive
 	}
 	if m.usedIDs == nil {
 		m.usedIDs = make(map[string]struct{})
 	}
 	if _, reused := m.usedIDs[runID]; reused {
-		return ErrRunIDReused
+		return m.statusLocked(), ErrRunIDReused
 	}
 	m.usedIDs[runID] = struct{}{}
 	m.revision++
-	m.terminal = nil
 	m.active = &activeRun{
 		id: runID, status: RunStatusRunning, cancel: cancel,
 		done: make(chan struct{}), revision: m.revision,
 	}
-	return nil
+	return m.statusLocked(), nil
 }
 
 func (m *RunManager) Status() RunStatusResponse {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.statusLocked()
+}
+
+// StatusFor returns a retained snapshot for runID when one exists. If the
+// requested run is unknown, it falls back to the current server snapshot so a
+// client can distinguish idle from a different active or terminal run.
+func (m *RunManager) StatusFor(runID string) RunStatusResponse {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if runID == "" {
+		return m.statusLocked()
+	}
+	if m.active != nil && m.active.id == runID {
+		return m.activeStatusLocked()
+	}
+	if terminal, ok := m.terminals[runID]; ok {
+		return cloneRunStatusResponse(terminal)
+	}
 	return m.statusLocked()
 }
 
@@ -144,8 +173,10 @@ func (m *RunManager) Finish(runID string, status RunStatus, summary *types.RunSu
 	}
 	close(m.active.done)
 	m.active = nil
-	m.terminal = &terminal
-	return terminal, true
+	stored := cloneRunStatusResponse(terminal)
+	m.terminal = &stored
+	m.retainTerminalLocked(stored)
+	return cloneRunStatusResponse(terminal), true
 }
 
 func (m *RunManager) CancelActive() {
@@ -185,14 +216,31 @@ func (m *RunManager) Wait(ctx context.Context) error {
 
 func (m *RunManager) statusLocked() RunStatusResponse {
 	if m.active != nil {
-		return RunStatusResponse{Status: m.active.status, RunID: m.active.id, Revision: m.active.revision}
+		return m.activeStatusLocked()
 	}
 	if m.terminal != nil {
-		status := *m.terminal
-		status.Summary = cloneRunSummary(status.Summary)
-		return status
+		return cloneRunStatusResponse(*m.terminal)
 	}
 	return RunStatusResponse{Status: RunStatusIdle, Revision: m.revision}
+}
+
+func (m *RunManager) activeStatusLocked() RunStatusResponse {
+	return RunStatusResponse{Status: m.active.status, RunID: m.active.id, Revision: m.active.revision}
+}
+
+func (m *RunManager) retainTerminalLocked(terminal RunStatusResponse) {
+	if m.terminals == nil {
+		m.terminals = make(map[string]RunStatusResponse)
+	}
+	if _, exists := m.terminals[terminal.RunID]; !exists {
+		m.terminalOrder = append(m.terminalOrder, terminal.RunID)
+	}
+	m.terminals[terminal.RunID] = terminal
+	for len(m.terminalOrder) > retainedTerminalRuns {
+		oldest := m.terminalOrder[0]
+		m.terminalOrder = m.terminalOrder[1:]
+		delete(m.terminals, oldest)
+	}
 }
 
 func isTerminalRunStatus(status RunStatus) bool {
@@ -206,4 +254,9 @@ func cloneRunSummary(summary *types.RunSummary) *types.RunSummary {
 	cloned := *summary
 	cloned.Warnings = append([]string(nil), summary.Warnings...)
 	return &cloned
+}
+
+func cloneRunStatusResponse(status RunStatusResponse) RunStatusResponse {
+	status.Summary = cloneRunSummary(status.Summary)
+	return status
 }

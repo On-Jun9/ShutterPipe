@@ -75,15 +75,18 @@ async function startBackupRunOnServer(config) {
     }
 }
 
-async function cancelBackupRunOnServer(runId) {
+async function cancelBackupRunOnServer(runId, serverId) {
     if (!runId) {
         return { success: false, status: 400, error: 'run_id is required' };
+    }
+    if (!serverId) {
+        return { success: false, status: 400, error: 'server_id is required' };
     }
     try {
         const response = await fetchRunApi('/api/run/cancel', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ run_id: runId })
+            body: JSON.stringify({ run_id: runId, server_id: serverId })
         });
 
         if (!response.ok) {
@@ -111,9 +114,10 @@ async function cancelBackupRunOnServer(runId) {
     }
 }
 
-async function getBackupRunStatusFromServer() {
+async function getBackupRunStatusFromServer(runId = null) {
     try {
-        const response = await fetchRunApi('/api/run/status');
+        const query = runId ? `?run_id=${encodeURIComponent(runId)}` : '';
+        const response = await fetchRunApi(`/api/run/status${query}`);
         if (!response.ok) {
             const parsedError = await parseApiErrorResponse(response);
             return {

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
@@ -132,7 +131,7 @@ func TestServerSetupRoutes_ContainsRunCancelRoute(t *testing.T) {
 	// /api/run/cancel 라우트가 등록되어 취소 핸들러로 연결되어야 한다.
 	s := NewServer()
 
-	req := httptest.NewRequest(http.MethodPost, "/api/run/cancel", strings.NewReader(`{"run_id":"route-test"}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/run/cancel", cancelRunRequestBody(t, s, "route-test"))
 	req.Host = "localhost:8080"
 	rr := httptest.NewRecorder()
 	s.router.ServeHTTP(rr, req)
@@ -145,7 +144,7 @@ func TestServerSetupRoutes_ContainsRunCancelRoute(t *testing.T) {
 func TestServerSetupRoutes_RejectsCrossOriginStateChange(t *testing.T) {
 	s := NewServer()
 
-	req := httptest.NewRequest(http.MethodPost, "/api/run/cancel", strings.NewReader(`{"run_id":"same-origin-test"}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/run/cancel", cancelRunRequestBody(t, s, "same-origin-test"))
 	req.Host = "localhost:8080"
 	req.Header.Set("Origin", "https://attacker.example")
 	rr := httptest.NewRecorder()
@@ -167,7 +166,7 @@ func TestServerSetupRoutes_RejectsCrossOriginStateChange(t *testing.T) {
 func TestServerSetupRoutes_AllowsSameOriginStateChange(t *testing.T) {
 	s := NewServer()
 
-	req := httptest.NewRequest(http.MethodPost, "/api/run/cancel", strings.NewReader(`{"run_id":"same-origin-test"}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/run/cancel", cancelRunRequestBody(t, s, "same-origin-test"))
 	req.Host = "localhost:8080"
 	req.Header.Set("Origin", "http://"+req.Host)
 	rr := httptest.NewRecorder()

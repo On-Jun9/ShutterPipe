@@ -36,10 +36,13 @@ type copyExecutor interface {
 	CopyAll(context.Context, []types.CopyTask, chan<- copier.CopyResult)
 }
 
+type sidecarIdentityResolver func(context.Context, types.FileEntry) (metadata.SidecarIdentityInfo, bool, error)
+
 type Pipeline struct {
 	cfg              *config.Config
 	scanner          *scanner.Scanner
 	meta             metadataExtractor
+	sidecarIdentity  sidecarIdentityResolver
 	planner          *planner.Planner
 	dedup            *policy.DedupChecker
 	conflict         *policy.ConflictResolver
@@ -55,6 +58,12 @@ func New(cfg *config.Config) (*Pipeline, error) {
 	if err != nil {
 		return nil, err
 	}
+	keepLogger := false
+	defer func() {
+		if !keepLogger {
+			_ = logger.Close()
+		}
+	}()
 
 	st, err := state.Load(cfg.StateFile)
 	if err != nil {
@@ -70,10 +79,11 @@ func New(cfg *config.Config) (*Pipeline, error) {
 
 	copyWorkers := effectiveCopyWorkers(cfg.Jobs, cfg.ConflictPolicy)
 
-	return &Pipeline{
+	p := &Pipeline{
 		cfg:             cfg,
 		scanner:         scanner.New(cfg.IncludeExtensions),
 		meta:            metadata.New(),
+		sidecarIdentity: metadata.SidecarIdentity,
 		planner:         planner.New(cfg.Dest, cfg.UnclassifiedDir, cfg.OrganizeStrategy, cfg.EventName),
 		dedup:           policy.NewDedupChecker(cfg.DedupMethod),
 		conflict:        policy.NewConflictResolver(cfg.ConflictPolicy, quarantinePath),
@@ -81,7 +91,9 @@ func New(cfg *config.Config) (*Pipeline, error) {
 		state:           st,
 		logger:          logger,
 		userDataManager: userDataManager,
-	}, nil
+	}
+	keepLogger = true
+	return p, nil
 }
 
 func effectiveCopyWorkers(configured int, conflictPolicy types.ConflictPolicy) int {
@@ -245,14 +257,29 @@ func (p *Pipeline) RunWithContext(ctx context.Context) (*types.RunSummary, error
 			}
 		}
 
-		sctx := sourceContext(fingerprint, entry)
+		sctx, sidecar, hasSidecar, err := p.sourceContext(ctx, fingerprint, entry)
+		if cause := contextTermination(ctx, err); cause != nil {
+			summary.TotalFiles = filteredCount
+			summary.Unclassified = unclassifiedCount
+			return p.finishCanceledRun(summary, 0, cause)
+		}
+		if err != nil {
+			summary.TotalFiles = filteredCount + 1
+			summary.Unclassified = unclassifiedCount
+			summary.Failed++
+			return p.finishFailedRun(
+				summary,
+				0,
+				fmt.Errorf("failed to identify metadata sidecar for %s: %w", entry.Path, err),
+			)
+		}
 		stateProcessed := !p.cfg.IgnoreState && p.state.IsEntryProcessed(ctx, entry, p.cfg.HashVerify, sctx)
 		if stateProcessed && p.cfg.ConflictPolicy != types.ConflictPolicyOverwrite {
 			continue
 		}
 		contextBySource[entry.Path] = sctx
 
-		meta, err := p.meta.ExtractWithContext(ctx, entry)
+		meta, err := p.extractMetadata(ctx, entry, sidecar, hasSidecar)
 		if cause := contextTermination(ctx, err); cause != nil {
 			summary.TotalFiles = filteredCount
 			summary.Unclassified = unclassifiedCount
@@ -506,6 +533,14 @@ func (p *Pipeline) RunWithContext(ctx context.Context) (*types.RunSummary, error
 		// Overwrite replay establishes one ordered final state. Commit its source
 		// state only after every winner succeeds so cancellation/failure leaves a
 		// dirty source that forces the next run to converge again.
+		// Re-resolve identities after publish as well. Two missing names such as
+		// Photo.jpg and photo.jpg cannot be proven aliases during planning on a
+		// case-insensitive or Unicode-normalizing filesystem. Once published,
+		// both names resolve to the same directory entry and can share the real
+		// final winner before state is committed.
+		overwriteSourcesByDest, overwriteDirtyCountByDest, overwriteWinnerByDest = mergeCommittedOverwriteStateGroups(
+			overwriteSourcesByDest, overwriteDirtyCountByDest, overwriteWinnerByDest, overwriteSequenceByDest,
+		)
 		for destPath, sources := range overwriteSourcesByDest {
 			winner := overwriteWinnerByDest[destPath]
 			if p.cfg.HashVerify && (winner.sourcePath == "" || len(winner.hash) == 0) {
@@ -605,14 +640,42 @@ func stateFingerprint(cfg *config.Config) string {
 // per-file metadata sidecar identity. A later-appearing or changed sidecar (e.g.
 // a video's M01.XML) can move the file to a different destination, so it must be
 // part of the reprocessing decision alongside the configuration.
-func sourceContext(fingerprint string, entry types.FileEntry) state.SourceContext {
+func (p *Pipeline) sourceContext(ctx context.Context, fingerprint string, entry types.FileEntry) (state.SourceContext, metadata.SidecarIdentityInfo, bool, error) {
 	sctx := state.SourceContext{ConfigFingerprint: fingerprint}
-	if size, modTime, ok := metadata.SidecarIdentity(entry); ok {
-		sctx.SidecarPresent = true
-		sctx.SidecarSize = size
-		sctx.SidecarModTimeUnixNano = modTime
+	resolveIdentity := p.sidecarIdentity
+	if resolveIdentity == nil {
+		resolveIdentity = metadata.SidecarIdentity
 	}
-	return sctx
+	identity, ok, err := resolveIdentity(ctx, entry)
+	if err != nil {
+		return state.SourceContext{}, metadata.SidecarIdentityInfo{}, false, err
+	}
+	if ok {
+		sctx.SidecarPresent = true
+		sctx.SidecarPath = identity.Path
+		sctx.SidecarSize = identity.Size
+		sctx.SidecarModTimeUnixNano = identity.ModTimeUnixNano
+		sctx.SidecarHash = identity.Hash
+	}
+	return sctx, identity, ok, nil
+}
+
+// extractMetadata classifies videos from the sidecar snapshot captured for the
+// state identity, so the recorded hash and the planned destination always come
+// from the same sidecar content. Reopening the sidecar here would let a swap
+// between hashing and parsing bind one content's identity to another content's
+// destination. Non-video entries keep the regular extractor path.
+func (p *Pipeline) extractMetadata(ctx context.Context, entry types.FileEntry, sidecar metadata.SidecarIdentityInfo, hasSidecar bool) (types.MediaMetadata, error) {
+	if !entry.IsVideo {
+		return p.meta.ExtractWithContext(ctx, entry)
+	}
+	if err := ctx.Err(); err != nil {
+		return types.MediaMetadata{}, err
+	}
+	if !hasSidecar {
+		return types.MediaMetadata{Error: "XML metadata file not found"}, nil
+	}
+	return metadata.ExtractFromSidecar(sidecar), nil
 }
 
 func overwriteDispositionCount(policy types.ConflictPolicy, dirtyCountByDest map[string]int, destPath string) int {
@@ -638,6 +701,65 @@ type overwriteCandidate struct {
 
 type overwriteGroup struct {
 	candidates []overwriteCandidate
+}
+
+type committedOverwriteStateGroup struct {
+	destPath string
+	sequence int
+	sources  []types.FileEntry
+	dirty    int
+	winner   verifiedCopyIdentity
+}
+
+func mergeCommittedOverwriteStateGroups(
+	sourcesByDest map[string][]types.FileEntry,
+	dirtyCountByDest map[string]int,
+	winnerByDest map[string]verifiedCopyIdentity,
+	sequenceByDest map[string]int,
+) (map[string][]types.FileEntry, map[string]int, map[string]verifiedCopyIdentity) {
+	resolver := newDestinationIdentityResolver()
+	paths := make([]string, 0, len(sourcesByDest))
+	for destPath := range sourcesByDest {
+		paths = append(paths, destPath)
+	}
+	sort.Slice(paths, func(i, j int) bool {
+		left, right := sequenceByDest[paths[i]], sequenceByDest[paths[j]]
+		if left == right {
+			return paths[i] < paths[j]
+		}
+		return left < right
+	})
+
+	groups := make(map[string]*committedOverwriteStateGroup, len(paths))
+	order := make([]string, 0, len(paths))
+	for _, destPath := range paths {
+		identity := resolver.Identity(destPath)
+		group, exists := groups[identity]
+		if !exists {
+			group = &committedOverwriteStateGroup{sequence: -1}
+			groups[identity] = group
+			order = append(order, identity)
+		}
+		group.sources = append(group.sources, sourcesByDest[destPath]...)
+		group.dirty += dirtyCountByDest[destPath]
+		sequence := sequenceByDest[destPath]
+		if sequence >= group.sequence {
+			group.destPath = destPath
+			group.sequence = sequence
+			group.winner = winnerByDest[destPath]
+		}
+	}
+
+	mergedSources := make(map[string][]types.FileEntry, len(groups))
+	mergedDirty := make(map[string]int, len(groups))
+	mergedWinners := make(map[string]verifiedCopyIdentity, len(groups))
+	for _, identity := range order {
+		group := groups[identity]
+		mergedSources[group.destPath] = group.sources
+		mergedDirty[group.destPath] = group.dirty
+		mergedWinners[group.destPath] = group.winner
+	}
+	return mergedSources, mergedDirty, mergedWinners
 }
 
 func selectDirtyOverwriteGroups(
@@ -776,6 +898,12 @@ func (p *Pipeline) finishCanceledRun(summary *types.RunSummary, bytesCopied int6
 		}
 	}
 	return summary, ErrRunCanceled
+}
+
+func (p *Pipeline) finishFailedRun(summary *types.RunSummary, bytesCopied int64, err error) (*types.RunSummary, error) {
+	p.finalizeSummary(summary, bytesCopied)
+	p.persistRunResult(summary, types.BackupStatusFailed)
+	return summary, err
 }
 
 func (p *Pipeline) finalizeSummary(summary *types.RunSummary, bytesCopied int64) {

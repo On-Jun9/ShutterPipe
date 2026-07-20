@@ -13,6 +13,7 @@ import (
 
 	"github.com/On-Jun9/ShutterPipe/internal/config"
 	"github.com/On-Jun9/ShutterPipe/internal/copier"
+	"github.com/On-Jun9/ShutterPipe/internal/metadata"
 	"github.com/On-Jun9/ShutterPipe/internal/state"
 	"github.com/On-Jun9/ShutterPipe/pkg/types"
 )
@@ -76,6 +77,18 @@ func TestSelectDirtyOverwriteGroups_DoesNotCollapseDistinctHardLinks(t *testing.
 	)
 	if len(selected) != 1 || selected[0].DestPath != firstDest || dirty[firstDest] != 1 {
 		t.Fatalf("distinct hard-link destinations were collapsed: selected=%+v dirty=%+v", selected, dirty)
+	}
+}
+
+func TestEquivalentDirectoryEntryName_RecognizesCaseAndUnicodeAliases(t *testing.T) {
+	if !equivalentDirectoryEntryName("Photo.jpg", "photo.jpg") {
+		t.Fatal("case aliases were not recognized")
+	}
+	if !equivalentDirectoryEntryName("caf\u00e9.jpg", "cafe\u0301.jpg") {
+		t.Fatal("Unicode normalization aliases were not recognized")
+	}
+	if equivalentDirectoryEntryName("first.jpg", "second.jpg") {
+		t.Fatal("distinct hard-link names must not be treated as aliases")
 	}
 }
 
@@ -1518,6 +1531,65 @@ func TestPipelineRun_OverwriteAliasReplayKeepsLastWinnerOnCaseInsensitiveDestina
 	}
 }
 
+func TestPipelineRun_FirstOverwriteOfMissingCaseAliasesCommitsConsistentHashState(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", filepath.Join(tmpDir, "home"))
+	sourceDir := filepath.Join(tmpDir, "src")
+	destDir := filepath.Join(tmpDir, "dest")
+	if err := os.MkdirAll(destDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	probe := filepath.Join(destDir, "CaseProbe")
+	if err := os.WriteFile(probe, []byte("probe"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(destDir, "caseprobe")); err != nil {
+		os.Remove(probe)
+		t.Skip("destination filesystem is case-sensitive")
+	}
+	if err := os.Remove(probe); err != nil {
+		t.Fatal(err)
+	}
+
+	firstPath := filepath.Join(sourceDir, "card-a", "Photo.jpg")
+	lastPath := filepath.Join(sourceDir, "card-b", "photo.jpg")
+	for path, content := range map[string]string{firstPath: "first-photo", lastPath: "last-photo"} {
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cfg := newTestConfig(tmpDir, sourceDir, destDir)
+	cfg.ConflictPolicy = types.ConflictPolicyOverwrite
+	cfg.HashVerify = true
+	cfg.Jobs = 8
+	p, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	summary, runErr := p.Run()
+	closeErr := p.Close()
+	if runErr != nil || closeErr != nil {
+		t.Fatalf("pipeline run failed: run=%v close=%v", runErr, closeErr)
+	}
+	if len(summary.Warnings) != 0 {
+		t.Fatalf("first alias run left state warnings: %+v", summary.Warnings)
+	}
+	if len(p.state.Processed) != 2 {
+		t.Fatalf("both alias sources were not recorded in one run: %+v", p.state.Processed)
+	}
+	if !p.state.Processed[firstPath].Superseded || p.state.Processed[lastPath].Superseded {
+		t.Fatalf("alias winner/superseded state is incorrect: %+v", p.state.Processed)
+	}
+	data, err := os.ReadFile(filepath.Join(destDir, "unclassified", "photo.jpg"))
+	if err != nil || string(data) != "last-photo" {
+		t.Fatalf("last case alias did not remain the final winner: data=%q err=%v", data, err)
+	}
+}
+
 func TestPipelineRun_OverwriteReplaysOnlyDirtyDestinationGroup(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", filepath.Join(tmpDir, "home"))
@@ -2088,6 +2160,113 @@ func TestPipelineRun_SidecarChangeDuringRunIsDetectedNextRun(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(destDir, "2023", "05", "15", "clip.mp4")); err != nil {
 		t.Fatalf("촬영일 경로로 재분류되지 않았다: %v", err)
+	}
+}
+
+func TestPipelineRun_SameStatSidecarContentChangeForcesReclassification(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", filepath.Join(tmpDir, "home"))
+	sourceDir := filepath.Join(tmpDir, "src")
+	destDir := filepath.Join(tmpDir, "dest")
+	for _, dir := range []string{sourceDir, destDir} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	videoPath := filepath.Join(sourceDir, "clip.mp4")
+	sidecarPath := filepath.Join(sourceDir, "clipM01.XML")
+	if err := os.WriteFile(videoPath, []byte("video-bytes"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	firstXML := []byte(`<NonRealTimeMeta><CreationDate value="2024-01-01T00:00:00Z"/></NonRealTimeMeta>`)
+	secondXML := []byte(`<NonRealTimeMeta><CreationDate value="2025-02-02T00:00:00Z"/></NonRealTimeMeta>`)
+	if len(firstXML) != len(secondXML) {
+		t.Fatal("test sidecars must have equal size")
+	}
+	if err := os.WriteFile(sidecarPath, firstXML, 0644); err != nil {
+		t.Fatal(err)
+	}
+	sidecarInfo, err := os.Stat(sidecarPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := newTestConfig(tmpDir, sourceDir, destDir)
+	cfg.IncludeExtensions = []string{"mp4"}
+	cfg.HashVerify = true
+	run := func() *types.RunSummary {
+		p, newErr := New(cfg)
+		if newErr != nil {
+			t.Fatal(newErr)
+		}
+		summary, runErr := p.Run()
+		closeErr := p.Close()
+		if runErr != nil || closeErr != nil {
+			t.Fatalf("pipeline run failed: run=%v close=%v", runErr, closeErr)
+		}
+		return summary
+	}
+
+	if first := run(); first.Copied != 1 {
+		t.Fatalf("first sidecar run did not copy video: %+v", *first)
+	}
+	if err := os.WriteFile(sidecarPath, secondXML, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(sidecarPath, sidecarInfo.ModTime(), sidecarInfo.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+
+	if second := run(); second.TotalFiles != 1 || second.Copied != 1 {
+		t.Fatalf("same-stat sidecar content change was not reprocessed: %+v", *second)
+	}
+	if _, err := os.Stat(filepath.Join(destDir, "2025", "02", "02", "clip.mp4")); err != nil {
+		t.Fatalf("video was not reclassified from changed sidecar content: %v", err)
+	}
+}
+
+func TestPipelineRun_SidecarIdentityFailurePersistsFailedHistory(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", filepath.Join(tmpDir, "home"))
+	sourceDir := filepath.Join(tmpDir, "src")
+	destDir := filepath.Join(tmpDir, "dest")
+	for _, dir := range []string{sourceDir, destDir} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	videoPath := filepath.Join(sourceDir, "clip.mp4")
+	if err := os.WriteFile(videoPath, []byte("video-bytes"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := newTestConfig(tmpDir, sourceDir, destDir)
+	cfg.IncludeExtensions = []string{"mp4"}
+	p, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	identityErr := errors.New("sidecar permission denied")
+	p.sidecarIdentity = func(context.Context, types.FileEntry) (metadata.SidecarIdentityInfo, bool, error) {
+		return metadata.SidecarIdentityInfo{}, false, identityErr
+	}
+
+	summary, runErr := p.Run()
+	if !errors.Is(runErr, identityErr) {
+		t.Fatalf("expected sidecar identity failure, got %v", runErr)
+	}
+	if summary == nil || summary.Failed != 1 || summary.TotalFiles != 1 {
+		t.Fatalf("sidecar failure summary was not preserved: %+v", summary)
+	}
+
+	history, err := p.userDataManager.LoadBackupHistory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(history.Entries) != 1 || history.Entries[0].Status != types.BackupStatusFailed ||
+		history.Entries[0].Summary.Failed != 1 {
+		t.Fatalf("sidecar failure history was not persisted: %+v", history.Entries)
 	}
 }
 

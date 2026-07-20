@@ -286,6 +286,46 @@ func TestStateConfigFingerprintChangeForcesReprocess(t *testing.T) {
 	}
 }
 
+func TestStateSidecarPathAndHashChangesForceReprocess(t *testing.T) {
+	tmpDir := t.TempDir()
+	sourcePath := filepath.Join(tmpDir, "source.mp4")
+	destPath := filepath.Join(tmpDir, "dest.mp4")
+	for _, path := range []string{sourcePath, destPath} {
+		if err := os.WriteFile(path, []byte("video"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	info, err := os.Stat(sourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := types.FileEntry{Path: sourcePath, Size: info.Size(), ModTime: info.ModTime()}
+	original := SourceContext{
+		ConfigFingerprint: "same",
+		SidecarPresent:    true,
+		SidecarPath:       filepath.Join(tmpDir, "clipM01.XML"),
+		SidecarSize:       10,
+		SidecarHash:       "hash-a",
+	}
+	st := New(filepath.Join(tmpDir, "state.json"))
+	if err := st.MarkProcessedEntry(context.Background(), entry, destPath, false, original); err != nil {
+		t.Fatal(err)
+	}
+	if !st.IsEntryProcessed(context.Background(), entry, false, original) {
+		t.Fatal("identical sidecar identity must remain processed")
+	}
+	changedHash := original
+	changedHash.SidecarHash = "hash-b"
+	if st.IsEntryProcessed(context.Background(), entry, false, changedHash) {
+		t.Fatal("sidecar content hash change did not force reprocessing")
+	}
+	changedPath := original
+	changedPath.SidecarPath = filepath.Join(tmpDir, "clipM01.xml")
+	if st.IsEntryProcessed(context.Background(), entry, false, changedPath) {
+		t.Fatal("sidecar path change did not force reprocessing")
+	}
+}
+
 // TestStateHashingHonorsContextCancellation은 hash_verify 재해싱이 취소 신호를
 // 전파해 느린 NAS/대용량 파일에서 취소가 지연되지 않는지 검증한다.
 func TestStateHashingHonorsContextCancellation(t *testing.T) {

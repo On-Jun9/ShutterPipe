@@ -14,10 +14,10 @@ import (
 	"github.com/On-Jun9/ShutterPipe/pkg/types"
 )
 
-type stagedVerifierFunc func(context.Context, string, int64, []byte) error
+type stagedVerifierFunc func(context.Context, *os.File, int64, []byte) error
 
-func (f stagedVerifierFunc) VerifyStagedWithContext(ctx context.Context, path string, size int64, hash []byte) error {
-	return f(ctx, path, size, hash)
+func (f stagedVerifierFunc) VerifyStagedFileWithContext(ctx context.Context, file *os.File, size int64, hash []byte) error {
+	return f(ctx, file, size, hash)
 }
 
 type cancelAfterChecksContext struct {
@@ -509,31 +509,35 @@ func TestCopierCopyOne_ReturnsCopyAndPartCleanupErrors(t *testing.T) {
 	if !ok || len(joined.Unwrap()) != 2 {
 		t.Fatalf("expected joined copy and cleanup errors, got %T: %v", result.Error, result.Error)
 	}
-	if !strings.Contains(result.Error.Error(), expectedCleanupErr.Error()) {
-		t.Fatalf("expected part cleanup error %q, got %v", expectedCleanupErr, result.Error)
+	if !strings.Contains(result.Error.Error(), "directory not empty") {
+		t.Fatalf("expected part cleanup error equivalent to %q, got %v", expectedCleanupErr, result.Error)
 	}
 }
 
 func TestCopierPartPathsAreUniquePerTask(t *testing.T) {
 	tmpDir := t.TempDir()
-	c := New(2, false, false)
 	destPath := filepath.Join(tmpDir, "photo.jpg")
+	root, err := os.OpenRoot(tmpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
 
-	first, err := c.partFileFactory(destPath)
+	first, firstPath, err := newPartFileInRoot(root, filepath.Base(destPath))
 	if err != nil {
 		t.Fatalf("failed to create first part path: %v", err)
 	}
 	defer first.Close()
-	defer os.Remove(first.Name())
-	second, err := c.partFileFactory(destPath)
+	defer root.Remove(firstPath)
+	second, secondPath, err := newPartFileInRoot(root, filepath.Base(destPath))
 	if err != nil {
 		t.Fatalf("failed to create second part path: %v", err)
 	}
 	defer second.Close()
-	defer os.Remove(second.Name())
+	defer root.Remove(secondPath)
 
-	if first.Name() == second.Name() {
-		t.Fatalf("expected task-specific part paths, both were %s", first.Name())
+	if firstPath == secondPath {
+		t.Fatalf("expected task-specific part paths, both were %s", firstPath)
 	}
 }
 
@@ -648,11 +652,12 @@ func TestCopierQuarantinePolicyMovesLateConflictWithoutReplacingEitherFile(t *te
 	}
 
 	result := New(1, false, false).copyOne(context.Background(), types.CopyTask{
-		Source:         types.FileEntry{Path: srcPath, Name: "src.jpg", Size: int64(len("source"))},
-		DestPath:       destPath,
-		Action:         types.CopyActionCopied,
-		ConflictPolicy: types.ConflictPolicyQuarantine,
-		QuarantineDir:  quarantineDir,
+		Source:          types.FileEntry{Path: srcPath, Name: "src.jpg", Size: int64(len("source"))},
+		DestinationRoot: tmpDir,
+		DestPath:        destPath,
+		Action:          types.CopyActionCopied,
+		ConflictPolicy:  types.ConflictPolicyQuarantine,
+		QuarantineDir:   quarantineDir,
 	})
 	if result.Error != nil || result.Task.Action != types.CopyActionQuarantined {
 		t.Fatalf("late quarantine failed: %+v", result)
@@ -710,7 +715,7 @@ func TestCopierHashVerifyFailureRemovesPartAndPreservesFinal(t *testing.T) {
 			}
 
 			c := New(1, false, true)
-			c.verifier = stagedVerifierFunc(func(context.Context, string, int64, []byte) error { return verifyErr })
+			c.verifier = stagedVerifierFunc(func(context.Context, *os.File, int64, []byte) error { return verifyErr })
 			result := c.copyOne(context.Background(), types.CopyTask{
 				Source:   types.FileEntry{Path: srcPath, Name: "source.jpg", Size: int64(len(sourceData))},
 				DestPath: destPath, Action: types.CopyActionCopied, ConflictPolicy: types.ConflictPolicySkip,
@@ -756,6 +761,47 @@ func TestCopierRejectsDestinationSubdirSymlinkEscape(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(outside, "source.jpg")); !os.IsNotExist(err) {
 		t.Fatalf("file escaped destination root: %v", err)
+	}
+}
+
+func TestCopierRejectsDestinationSymlinkSwapAfterRootOpen(t *testing.T) {
+	tmpDir := t.TempDir()
+	root := filepath.Join(tmpDir, "destination")
+	destinationDir := filepath.Join(root, "unclassified")
+	movedDir := filepath.Join(root, "moved")
+	outside := filepath.Join(tmpDir, "outside")
+	for _, dir := range []string{destinationDir, outside} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	source := filepath.Join(tmpDir, "source.jpg")
+	if err := os.WriteFile(source, []byte("source"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	copier := New(1, false, false)
+	copier.beforeDestinationCreate = func(types.CopyTask) {
+		if err := os.Rename(destinationDir, movedDir); err != nil {
+			t.Fatalf("failed to move validated destination directory: %v", err)
+		}
+		if err := os.Symlink(outside, destinationDir); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+	}
+	result := copier.copyOne(context.Background(), types.CopyTask{
+		Source:          types.FileEntry{Path: source, Name: "source.jpg", Size: 6},
+		DestPath:        filepath.Join(destinationDir, "source.jpg"),
+		DestinationRoot: root,
+		ConflictPolicy:  types.ConflictPolicySkip,
+		Action:          types.CopyActionCopied,
+	})
+
+	if result.Error == nil || !strings.Contains(result.Error.Error(), "escapes configured root") {
+		t.Fatalf("expected post-open symlink swap rejection, got %v", result.Error)
+	}
+	if _, err := os.Stat(filepath.Join(outside, "source.jpg")); !os.IsNotExist(err) {
+		t.Fatalf("file escaped destination root after symlink swap: %v", err)
 	}
 }
 
@@ -830,37 +876,39 @@ func TestCopierRejectsQuarantineSymlinkEscapeBeforeCreatingOutsideDirectories(t 
 	}
 }
 
-// TestMovePartNoReplacePreservesNoClobber는 exFAT fallback 추가 이후에도 기존
-// 파일을 덮어쓰지 않고 os.ErrExist를 유지하며, 신규 파일은 정상 publish하는지
-// 검증한다. (fallback 자체는 exFAT/FAT 실기 환경에서 확인한다.)
-func TestMovePartNoReplacePreservesNoClobber(t *testing.T) {
+func TestMovePartNoReplaceInRootPreservesNoClobber(t *testing.T) {
 	dir := t.TempDir()
-
-	// 신규 대상: part를 finalDest로 publish하고 part는 제거되어야 한다.
-	partPath := filepath.Join(dir, ".photo.part")
-	finalDest := filepath.Join(dir, "photo.jpg")
-	if err := os.WriteFile(partPath, []byte("new"), 0644); err != nil {
+	root, err := os.OpenRoot(dir)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := movePartNoReplace(partPath, finalDest); err != nil {
+	defer root.Close()
+
+	// 신규 대상: part를 finalDest로 publish하고 part는 제거되어야 한다.
+	partPath := ".photo.part"
+	finalDest := "photo.jpg"
+	if err := root.WriteFile(partPath, []byte("new"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := movePartNoReplaceInRoot(root, partPath, finalDest); err != nil {
 		t.Fatalf("신규 대상 publish 실패: %v", err)
 	}
-	if _, err := os.Stat(partPath); !os.IsNotExist(err) {
+	if _, err := root.Stat(partPath); !os.IsNotExist(err) {
 		t.Fatalf("publish 후 part 파일이 남아 있음: %v", err)
 	}
-	if data, err := os.ReadFile(finalDest); err != nil || string(data) != "new" {
+	if data, err := root.ReadFile(finalDest); err != nil || string(data) != "new" {
 		t.Fatalf("publish 내용 불일치: data=%q err=%v", data, err)
 	}
 
 	// 기존 파일 존재: 덮어쓰지 않고 os.ErrExist를 반환해야 한다.
-	part2 := filepath.Join(dir, ".photo2.part")
-	if err := os.WriteFile(part2, []byte("intruder"), 0644); err != nil {
+	part2 := ".photo2.part"
+	if err := root.WriteFile(part2, []byte("intruder"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := movePartNoReplace(part2, finalDest); !errors.Is(err, os.ErrExist) {
+	if err := movePartNoReplaceInRoot(root, part2, finalDest); !errors.Is(err, os.ErrExist) {
 		t.Fatalf("기존 파일이 있을 때 os.ErrExist를 기대했으나 got %v", err)
 	}
-	if data, err := os.ReadFile(finalDest); err != nil || string(data) != "new" {
+	if data, err := root.ReadFile(finalDest); err != nil || string(data) != "new" {
 		t.Fatalf("기존 파일이 덮어써짐: data=%q err=%v", data, err)
 	}
 }

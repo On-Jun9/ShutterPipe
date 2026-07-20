@@ -1,6 +1,11 @@
 package pipeline
 
-import "path/filepath"
+import (
+	"path/filepath"
+	"strings"
+
+	"golang.org/x/text/unicode/norm"
+)
 
 type destinationIdentityResolver struct {
 	identities map[string]string
@@ -12,7 +17,7 @@ func newDestinationIdentityResolver() *destinationIdentityResolver {
 	return &destinationIdentityResolver{
 		identities: make(map[string]string),
 		parents:    make(map[string]string),
-		canonical:  canonicalOpenedPath,
+		canonical:  newCanonicalOpenedPathResolver(),
 	}
 }
 
@@ -43,4 +48,15 @@ func (r *destinationIdentityResolver) Identity(path string) string {
 	identity := filepath.Join(resolvedParent, filepath.Base(path))
 	r.identities[path] = identity
 	return identity
+}
+
+func equivalentDirectoryEntryName(left, right string) bool {
+	if strings.EqualFold(left, right) {
+		return true
+	}
+	return normalizeDirectoryEntryName(left) == normalizeDirectoryEntryName(right)
+}
+
+func normalizeDirectoryEntryName(name string) string {
+	return norm.NFC.String(strings.ToLower(name))
 }

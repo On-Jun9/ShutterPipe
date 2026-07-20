@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/On-Jun9/ShutterPipe/pkg/types"
@@ -77,7 +78,7 @@ func TestRunManagerRejectsReusedRunID(t *testing.T) {
 	if _, finished := manager.Finish("run-reused", RunStatusComplete, nil, ""); !finished {
 		t.Fatal("expected first use to finish")
 	}
-	if err := manager.TryStart("run-reused", func() {}); !errors.Is(err, ErrRunIDReused) {
+	if _, err := manager.TryStart("run-reused", func() {}); !errors.Is(err, ErrRunIDReused) {
 		t.Fatalf("expected reused run ID rejection, got %v", err)
 	}
 	if !manager.Start("run-new", func() {}) {
@@ -132,9 +133,10 @@ func TestRunManagerTerminalSummaryIsAnImmutableSnapshot(t *testing.T) {
 	manager := NewRunManager()
 	manager.Start("snapshot-run", func() {})
 	summary := &types.RunSummary{Copied: 1}
-	manager.Finish("snapshot-run", RunStatusComplete, summary, "")
+	finished, _ := manager.Finish("snapshot-run", RunStatusComplete, summary, "")
 
 	summary.Copied = 99
+	finished.Summary.Copied = 77
 	first := manager.Status()
 	if first.Summary == nil || first.Summary.Copied != 1 {
 		t.Fatalf("stored summary followed caller mutation: %+v", first.Summary)
@@ -143,5 +145,63 @@ func TestRunManagerTerminalSummaryIsAnImmutableSnapshot(t *testing.T) {
 	second := manager.Status()
 	if second.Summary == nil || second.Summary.Copied != 1 {
 		t.Fatalf("stored summary was mutable through status response: %+v", second.Summary)
+	}
+}
+
+func TestRunManagerRetainsPreviousTerminalAfterNextRunStarts(t *testing.T) {
+	manager := NewRunManager()
+	manager.Start("finished-run", func() {})
+	finishedSummary := &types.RunSummary{Copied: 7}
+	manager.Finish("finished-run", RunStatusComplete, finishedSummary, "")
+
+	if !manager.Start("next-run", func() {}) {
+		t.Fatal("expected next run to start")
+	}
+	if current := manager.Status(); current.Status != RunStatusRunning || current.RunID != "next-run" {
+		t.Fatalf("unexpected current status: %+v", current)
+	}
+	retained := manager.StatusFor("finished-run")
+	if retained.Status != RunStatusComplete || retained.RunID != "finished-run" ||
+		retained.Summary == nil || retained.Summary.Copied != 7 {
+		t.Fatalf("previous terminal snapshot was not retained: %+v", retained)
+	}
+}
+
+func TestRunManagerBoundsRetainedTerminalHistory(t *testing.T) {
+	manager := NewRunManager()
+	for index := 0; index < retainedTerminalRuns+1; index++ {
+		runID := fmt.Sprintf("run-%d", index)
+		if !manager.Start(runID, func() {}) {
+			t.Fatalf("failed to start %s", runID)
+		}
+		manager.Finish(runID, RunStatusComplete, nil, "")
+	}
+
+	if status := manager.StatusFor("run-0"); status.RunID == "run-0" {
+		t.Fatalf("oldest terminal snapshot was not evicted: %+v", status)
+	}
+	if status := manager.StatusFor(fmt.Sprintf("run-%d", retainedTerminalRuns)); status.RunID == "" {
+		t.Fatalf("latest terminal snapshot was not retained: %+v", status)
+	}
+}
+
+// TestRunManagerNeverReusesRunIDWithinServerLifetime는 usedIDs가 서버 수명 동안
+// 회수되지 않는지 검증한다. 오래된 run_id를 회수하면 같은 ID로 시작한 새 실행이
+// 회수된 실행의 지연·재전송된 취소 요청에 취소될 수 있다.
+func TestRunManagerNeverReusesRunIDWithinServerLifetime(t *testing.T) {
+	manager := NewRunManager()
+	const completedRuns = 2048
+	for index := 0; index < completedRuns; index++ {
+		runID := fmt.Sprintf("bounded-run-%d", index)
+		if !manager.Start(runID, func() {}) {
+			t.Fatalf("failed to start %s", runID)
+		}
+		manager.Finish(runID, RunStatusComplete, nil, "")
+	}
+	if len(manager.usedIDs) != completedRuns {
+		t.Fatalf("used run IDs were discarded: ids=%d want=%d", len(manager.usedIDs), completedRuns)
+	}
+	if _, err := manager.TryStart("bounded-run-0", func() {}); !errors.Is(err, ErrRunIDReused) {
+		t.Fatalf("oldest run ID became reusable: %v", err)
 	}
 }

@@ -121,7 +121,15 @@ type RunRequest struct {
 }
 
 type CancelRunRequest struct {
-	RunID string `json:"run_id,omitempty"`
+	RunID    string `json:"run_id,omitempty"`
+	ServerID string `json:"server_id,omitempty"`
+}
+
+type StartRunResponse struct {
+	Status   string `json:"status"`
+	RunID    string `json:"run_id"`
+	ServerID string `json:"server_id"`
+	Revision uint64 `json:"revision"`
 }
 
 func newRunID() (string, error) {
@@ -177,7 +185,7 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	runCtx, cancelRun, err := s.startRun(runID)
+	runCtx, cancelRun, startStatus, err := s.startRun(runID)
 	if errors.Is(err, http.ErrServerClosed) {
 		writeAPIError(w, http.StatusServiceUnavailable, "server is shutting down")
 		return
@@ -197,7 +205,9 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "started", "run_id": runID, "server_id": s.instanceID()})
+	json.NewEncoder(w).Encode(StartRunResponse{
+		Status: "started", RunID: runID, ServerID: s.instanceID(), Revision: startStatus.Revision,
+	})
 
 	go func() {
 		defer cancelRun()
@@ -279,6 +289,14 @@ func (s *Server) handleCancelRun(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusBadRequest, ErrRunIDRequired.Error())
 		return
 	}
+	if req.ServerID == "" {
+		writeAPIError(w, http.StatusBadRequest, "server_id is required")
+		return
+	}
+	if req.ServerID != s.instanceID() {
+		writeAPIError(w, http.StatusConflict, "server_id does not match the current server")
+		return
+	}
 
 	status, err := s.runs().Cancel(req.RunID)
 	if err != nil {
@@ -292,7 +310,7 @@ func (s *Server) handleCancelRun(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRunStatus(w http.ResponseWriter, r *http.Request) {
-	status := s.runs().Status()
+	status := s.runs().StatusFor(r.URL.Query().Get("run_id"))
 	status.ServerID = s.instanceID()
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(status)

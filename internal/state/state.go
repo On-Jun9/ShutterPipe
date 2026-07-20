@@ -33,13 +33,15 @@ type ProcessedFile struct {
 	// directory or organize strategy correctly forces a re-backup instead of
 	// silently skipping the file against a stale destination.
 	ConfigFingerprint string `json:"config_fingerprint,omitempty"`
-	// Sidecar* capture the identity of the metadata sidecar (e.g. a video's
-	// M01.XML) that supplied the file's classification. If the sidecar appears or
-	// changes after this record was written, the destination may differ, so the
-	// file must be reprocessed instead of skipped against its old location.
-	SidecarPresent         bool  `json:"sidecar_present,omitempty"`
-	SidecarSize            int64 `json:"sidecar_size,omitempty"`
-	SidecarModTimeUnixNano int64 `json:"sidecar_mod_time_unix_nano,omitempty"`
+	// Sidecar* capture the path, stat identity, and content hash of the metadata
+	// sidecar (e.g. a video's M01.XML) that supplied the file's classification.
+	// If the sidecar appears or changes after this record was written, the
+	// destination may differ, so the file must be reprocessed.
+	SidecarPresent         bool   `json:"sidecar_present,omitempty"`
+	SidecarPath            string `json:"sidecar_path,omitempty"`
+	SidecarSize            int64  `json:"sidecar_size,omitempty"`
+	SidecarModTimeUnixNano int64  `json:"sidecar_mod_time_unix_nano,omitempty"`
+	SidecarHash            string `json:"sidecar_hash,omitempty"`
 }
 
 // SourceContext bundles the inputs, beyond the source file's own identity, that
@@ -48,15 +50,19 @@ type ProcessedFile struct {
 type SourceContext struct {
 	ConfigFingerprint      string
 	SidecarPresent         bool
+	SidecarPath            string
 	SidecarSize            int64
 	SidecarModTimeUnixNano int64
+	SidecarHash            string
 }
 
 func (c SourceContext) matchesRecord(record ProcessedFile) bool {
 	return record.ConfigFingerprint == c.ConfigFingerprint &&
 		record.SidecarPresent == c.SidecarPresent &&
+		record.SidecarPath == c.SidecarPath &&
 		record.SidecarSize == c.SidecarSize &&
-		record.SidecarModTimeUnixNano == c.SidecarModTimeUnixNano
+		record.SidecarModTimeUnixNano == c.SidecarModTimeUnixNano &&
+		record.SidecarHash == c.SidecarHash
 }
 
 type State struct {
@@ -217,8 +223,10 @@ func (s *State) markProcessedEntry(ctx context.Context, entry types.FileEntry, d
 		SourceHash: sourceHash, DestHash: destHash, Superseded: superseded,
 		ConfigFingerprint:      sctx.ConfigFingerprint,
 		SidecarPresent:         sctx.SidecarPresent,
+		SidecarPath:            sctx.SidecarPath,
 		SidecarSize:            sctx.SidecarSize,
 		SidecarModTimeUnixNano: sctx.SidecarModTimeUnixNano,
+		SidecarHash:            sctx.SidecarHash,
 	}
 	s.LastRun = now
 	s.mu.Unlock()

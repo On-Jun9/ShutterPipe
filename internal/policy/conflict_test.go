@@ -233,27 +233,78 @@ func TestConflictResolver_DefaultPolicyFallsBackToSkip(t *testing.T) {
 	}
 }
 
-// TestConflictResolver_GenerateUniqueName_ReturnsOriginalWhenExhausted는 테스트 코드 동작을 검증하거나 보조합니다.
-func TestConflictResolver_GenerateUniqueName_ReturnsOriginalWhenExhausted(t *testing.T) {
-	// _1~_9999 후보가 모두 존재하면 generateUniqueName은 원본 경로를 반환해야 한다.
+// reserveAllCandidates는 base 경로의 _1~_9999 후보를 모두 예약해 디스크 I/O 없이
+// 후보 소진 상태를 만든다.
+func reserveAllCandidates(resolver *ConflictResolver, dir, base, ext string) {
+	for i := 1; i < 10000; i++ {
+		resolver.reserve(filepath.Join(dir, base+"_"+strconv.Itoa(i)+ext), false)
+	}
+}
+
+// TestConflictResolver_GenerateUniqueName_ErrorsWhenExhausted는 _1~_9999 후보가
+// 모두 사용 중이면 원본 충돌 경로를 반환하는 대신 오류를 반환하는지 검증한다.
+// 원본 경로를 반환하면 호출부가 파일을 Skipped로 집계한 채 성공 종료한다.
+func TestConflictResolver_GenerateUniqueName_ErrorsWhenExhausted(t *testing.T) {
 	tmpDir := t.TempDir()
 	original := filepath.Join(tmpDir, "photo.jpg")
 
-	for i := 1; i < 10000; i++ {
-		candidate := filepath.Join(tmpDir, "photo_"+strconv.Itoa(i)+".jpg")
-		if err := os.WriteFile(candidate, []byte("x"), 0644); err != nil {
-			t.Fatalf("failed to create candidate file %d: %v", i, err)
-		}
+	resolver := NewConflictResolver(types.ConflictPolicyRename, filepath.Join(tmpDir, "quarantine"))
+	reserveAllCandidates(resolver, tmpDir, "photo", ".jpg")
+
+	if _, err := resolver.generateUniqueName(original); err == nil {
+		t.Fatal("expected error when all rename candidates are exhausted")
+	}
+}
+
+// TestConflictResolver_RenameExhaustionSurfacesAsFailure는 rename 정책에서 후보
+// 소진이 조용한 Skipped가 아니라 Resolution.Err(→ 파이프라인 Failed 집계)로
+// 노출되는지 검증한다.
+func TestConflictResolver_RenameExhaustionSurfacesAsFailure(t *testing.T) {
+	tmpDir := t.TempDir()
+	existingFile := filepath.Join(tmpDir, "photo.jpg")
+	if err := os.WriteFile(existingFile, []byte("existing"), 0644); err != nil {
+		t.Fatalf("failed to create existing file: %v", err)
 	}
 
 	resolver := NewConflictResolver(types.ConflictPolicyRename, filepath.Join(tmpDir, "quarantine"))
-	got, err := resolver.generateUniqueName(original)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	reserveAllCandidates(resolver, tmpDir, "photo", ".jpg")
+
+	res := resolver.Resolve(&types.CopyTask{
+		Source:   types.FileEntry{Name: "photo.jpg"},
+		DestPath: existingFile,
+	})
+
+	if res.Err == nil {
+		t.Fatal("expected Resolution.Err when rename candidates are exhausted")
+	}
+	if res.Skip {
+		t.Error("exhaustion must not be reported as skip")
+	}
+}
+
+// TestConflictResolver_QuarantineExhaustionSurfacesAsFailure는 quarantine 정책에서
+// 격리 후보 소진이 조용한 Skipped가 아니라 Resolution.Err로 노출되는지 검증한다.
+func TestConflictResolver_QuarantineExhaustionSurfacesAsFailure(t *testing.T) {
+	tmpDir := t.TempDir()
+	existingFile := filepath.Join(tmpDir, "photo.jpg")
+	if err := os.WriteFile(existingFile, []byte("existing"), 0644); err != nil {
+		t.Fatalf("failed to create existing file: %v", err)
 	}
 
-	if got != original {
-		t.Fatalf("expected original path when candidates exhausted, got %s", got)
+	quarantineDir := filepath.Join(tmpDir, "quarantine")
+	resolver := NewConflictResolver(types.ConflictPolicyQuarantine, quarantineDir)
+	reserveAllCandidates(resolver, quarantineDir, "photo", ".jpg")
+
+	res := resolver.Resolve(&types.CopyTask{
+		Source:   types.FileEntry{Name: "photo.jpg"},
+		DestPath: existingFile,
+	})
+
+	if res.Err == nil {
+		t.Fatal("expected Resolution.Err when quarantine candidates are exhausted")
+	}
+	if res.Skip {
+		t.Error("exhaustion must not be reported as skip")
 	}
 }
 
