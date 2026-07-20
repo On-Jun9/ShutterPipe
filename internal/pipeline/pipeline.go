@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/On-Jun9/ShutterPipe/internal/config"
@@ -218,6 +219,13 @@ func (p *Pipeline) RunWithContext(ctx context.Context) (*types.RunSummary, error
 	overwriteSequenceByDest := make(map[string]int)
 	var unclassifiedCount int
 	var filteredCount int
+	fingerprint := stateFingerprint(p.cfg)
+	// Capture each source's SourceContext once, at the moment its state is
+	// checked, and reuse the same value at commit time. Recomputing it at commit
+	// would bind the record to a sidecar snapshot that differs from the one the
+	// destination was planned against, letting a mid-run sidecar change be
+	// silently frozen into a stale destination on the next run.
+	contextBySource := make(map[string]state.SourceContext)
 
 	for i, entry := range entries {
 		if ctx.Err() != nil {
@@ -237,10 +245,12 @@ func (p *Pipeline) RunWithContext(ctx context.Context) (*types.RunSummary, error
 			}
 		}
 
-		stateProcessed := !p.cfg.IgnoreState && p.state.IsEntryProcessed(entry, p.cfg.HashVerify)
+		sctx := sourceContext(fingerprint, entry)
+		stateProcessed := !p.cfg.IgnoreState && p.state.IsEntryProcessed(ctx, entry, p.cfg.HashVerify, sctx)
 		if stateProcessed && p.cfg.ConflictPolicy != types.ConflictPolicyOverwrite {
 			continue
 		}
+		contextBySource[entry.Path] = sctx
 
 		meta, err := p.meta.ExtractWithContext(ctx, entry)
 		if cause := contextTermination(ctx, err); cause != nil {
@@ -279,15 +289,50 @@ func (p *Pipeline) RunWithContext(ctx context.Context) (*types.RunSummary, error
 				summary.Unclassified = unclassifiedCount
 				return p.finishCanceledRun(summary, 0, cause)
 			}
-			if err == nil && isDup {
+			if err != nil {
+				// A dedup check that could not read the source or destination must
+				// fail the file, not fall through and let a pre-existing destination
+				// be recorded as a successful skip.
+				task.Status = types.TaskStatusFailed
+				task.Action = types.CopyActionFailed
+				task.Error = err.Error()
+				summary.Failed++
+				p.logger.LogTask(task, 0)
+				continue
+			}
+			if isDup {
 				task.Status = types.TaskStatusSkipped
 				task.Action = types.CopyActionSkipped
 				summary.Skipped++
+				// The source is already represented at the destination. Upgrade its
+				// state record so later runs fast-skip instead of re-extracting
+				// metadata and re-deduplicating every time (e.g. legacy records left
+				// dirty by a state-schema change). markProcessed re-verifies hashes
+				// under hash_verify, so a name/size-only match with differing content
+				// is warned and left dirty rather than falsely recorded.
+				if !p.cfg.DryRun {
+					if err := p.markProcessed(ctx, entry, task.DestPath, nil, false, false, sctx); err != nil {
+						if cause := contextTermination(ctx, err); cause != nil {
+							summary.TotalFiles = filteredCount
+							summary.Unclassified = unclassifiedCount
+							return p.finishCanceledRun(summary, 0, cause)
+						}
+						summary.Warnings = append(summary.Warnings, "중복 파일의 처리 상태를 기록하지 못했습니다: "+err.Error())
+					}
+				}
 				continue
 			}
 		}
 
 		resolution := p.conflict.Resolve(&task)
+		if resolution.Err != nil {
+			task.Status = types.TaskStatusFailed
+			task.Action = types.CopyActionFailed
+			task.Error = resolution.Err.Error()
+			summary.Failed++
+			p.logger.LogTask(task, 0)
+			continue
+		}
 		if resolution.Skip {
 			task.Status = types.TaskStatusSkipped
 			task.Action = resolution.Action
@@ -337,18 +382,32 @@ func (p *Pipeline) RunWithContext(ctx context.Context) (*types.RunSummary, error
 
 	if len(tasks) == 0 {
 		p.finalizeSummary(summary, 0)
-		p.persistRunResult(summary, types.BackupStatusSuccess)
+		// Planning itself can fail files (e.g. an unreadable destination), so a
+		// run with no runnable tasks is not automatically a success.
+		status := types.BackupStatusSuccess
+		var runErr error
+		if summary.Failed > 0 {
+			status = types.BackupStatusFailed
+			runErr = fmt.Errorf("%w: %d file(s) failed", ErrRunFailed, summary.Failed)
+		}
+		p.persistRunResult(summary, status)
 
 		// Wait a bit to ensure previous progress messages are sent
 		time.Sleep(100 * time.Millisecond)
 
-		if p.progressCallback != nil {
+		if p.progressCallback != nil && runErr != nil {
+			p.progressCallback(ProgressUpdate{
+				Type:    "error",
+				Summary: summary,
+				Error:   runErr.Error(),
+			})
+		} else if p.progressCallback != nil {
 			p.progressCallback(ProgressUpdate{
 				Type:    "complete",
 				Summary: summary,
 			})
 		}
-		return summary, nil
+		return summary, runErr
 	}
 
 	resultChan := make(chan copier.CopyResult, len(tasks))
@@ -395,6 +454,9 @@ func (p *Pipeline) RunWithContext(ctx context.Context) (*types.RunSummary, error
 			p.logger.LogTask(result.Task, 0)
 			continue
 		}
+		if result.Warning != "" {
+			summary.Warnings = append(summary.Warnings, result.Warning)
+		}
 		if p.cfg.ConflictPolicy == types.ConflictPolicyOverwrite {
 			overwriteWinnerByDest[result.Task.DestPath] = verifiedCopyIdentity{
 				sourcePath: result.Task.Source.Path,
@@ -422,20 +484,25 @@ func (p *Pipeline) RunWithContext(ctx context.Context) (*types.RunSummary, error
 		}
 
 		if !p.cfg.DryRun && result.Task.Action != types.CopyActionSkipped && p.cfg.ConflictPolicy != types.ConflictPolicyOverwrite {
-			if err := p.markProcessed(result.Task.Source, result.Task.DestPath, result.VerifiedSourceHash, p.cfg.HashVerify, false); err != nil {
-				summary.Warnings = append(summary.Warnings, "파일 처리 상태를 기록하지 못했습니다: "+err.Error())
+			if err := p.markProcessed(ctx, result.Task.Source, result.Task.DestPath, result.VerifiedSourceHash, p.cfg.HashVerify, false, contextBySource[result.Task.Source.Path]); err != nil {
+				// A cancelled state commit must terminate the run as cancelled, not
+				// be downgraded to a warning that lets it finish as complete.
+				if cause := contextTermination(ctx, err); cause != nil {
+					if cancellationCause == nil {
+						cancellationCause = cause
+					}
+				} else {
+					summary.Warnings = append(summary.Warnings, "파일 처리 상태를 기록하지 못했습니다: "+err.Error())
+				}
 			}
 		}
 		p.logger.LogTask(result.Task, 0)
 	}
 
-	if cancellationCause != nil || (ctx.Err() != nil && processed < len(tasks)) {
-		if cancellationCause == nil {
-			cancellationCause = ctx.Err()
-		}
-		return p.finishCanceledRun(summary, bytesCopied, cancellationCause)
+	if cancellationCause == nil && ctx.Err() != nil && processed < len(tasks) {
+		cancellationCause = ctx.Err()
 	}
-	if !p.cfg.DryRun && p.cfg.ConflictPolicy == types.ConflictPolicyOverwrite && summary.Failed == 0 {
+	if cancellationCause == nil && !p.cfg.DryRun && p.cfg.ConflictPolicy == types.ConflictPolicyOverwrite && summary.Failed == 0 {
 		// Overwrite replay establishes one ordered final state. Commit its source
 		// state only after every winner succeeds so cancellation/failure leaves a
 		// dirty source that forces the next run to converge again.
@@ -448,11 +515,23 @@ func (p *Pipeline) RunWithContext(ctx context.Context) (*types.RunSummary, error
 			for _, source := range sources {
 				requireVerifiedHash := p.cfg.HashVerify && source.Path == winner.sourcePath
 				superseded := source.Path != winner.sourcePath
-				if err := p.markProcessed(source, destPath, winner.hash, requireVerifiedHash, superseded); err != nil {
+				if err := p.markProcessed(ctx, source, destPath, winner.hash, requireVerifiedHash, superseded, contextBySource[source.Path]); err != nil {
+					if cause := contextTermination(ctx, err); cause != nil {
+						cancellationCause = cause
+						break
+					}
 					summary.Warnings = append(summary.Warnings, "파일 처리 상태를 기록하지 못했습니다: "+err.Error())
 				}
 			}
+			if cancellationCause != nil {
+				break
+			}
 		}
+	}
+	// Re-check after every state commit so a cancellation during the final file's
+	// state hashing (copy loop or overwrite replay) still ends the run cancelled.
+	if cancellationCause != nil {
+		return p.finishCanceledRun(summary, bytesCopied, cancellationCause)
 	}
 
 	p.finalizeSummary(summary, bytesCopied)
@@ -488,20 +567,52 @@ type verifiedCopyIdentity struct {
 	hash       []byte
 }
 
-func (p *Pipeline) markProcessed(source types.FileEntry, destPath string, verifiedHash []byte, requireVerifiedHash, superseded bool) error {
+func (p *Pipeline) markProcessed(ctx context.Context, source types.FileEntry, destPath string, verifiedHash []byte, requireVerifiedHash, superseded bool, sctx state.SourceContext) error {
 	var err error
 	if requireVerifiedHash {
-		err = p.state.MarkProcessedEntryWithVerifiedHash(source, destPath, verifiedHash)
+		err = p.state.MarkProcessedEntryWithVerifiedHash(ctx, source, destPath, verifiedHash, sctx)
 	} else if superseded {
-		err = p.state.MarkSupersededEntry(source, destPath, p.cfg.HashVerify)
+		err = p.state.MarkSupersededEntry(ctx, source, destPath, p.cfg.HashVerify, sctx)
 	} else {
-		err = p.state.MarkProcessedEntry(source, destPath, p.cfg.HashVerify)
+		err = p.state.MarkProcessedEntry(ctx, source, destPath, p.cfg.HashVerify, sctx)
 	}
 	if err != nil {
 		p.logger.Error("Failed to record processed file", err)
 		return err
 	}
 	return nil
+}
+
+// stateFingerprint captures the configuration inputs that determine where a
+// source file is published. When any of them changes, prior state records must
+// not shortcut the run, or a re-pointed destination would be silently skipped.
+func stateFingerprint(cfg *config.Config) string {
+	return strings.Join([]string{
+		cfg.Dest,
+		string(cfg.OrganizeStrategy),
+		cfg.EventName,
+		cfg.UnclassifiedDir,
+		cfg.QuarantineDir,
+		// Conflict policy changes the publish outcome (rename → overwrite, etc.)
+		// and dedup method changes whether a file counts as already-present, so a
+		// change in either must re-evaluate files the previous policy skipped.
+		string(cfg.ConflictPolicy),
+		string(cfg.DedupMethod),
+	}, "\x00")
+}
+
+// sourceContext combines the run-level configuration fingerprint with the
+// per-file metadata sidecar identity. A later-appearing or changed sidecar (e.g.
+// a video's M01.XML) can move the file to a different destination, so it must be
+// part of the reprocessing decision alongside the configuration.
+func sourceContext(fingerprint string, entry types.FileEntry) state.SourceContext {
+	sctx := state.SourceContext{ConfigFingerprint: fingerprint}
+	if size, modTime, ok := metadata.SidecarIdentity(entry); ok {
+		sctx.SidecarPresent = true
+		sctx.SidecarSize = size
+		sctx.SidecarModTimeUnixNano = modTime
+	}
+	return sctx
 }
 
 func overwriteDispositionCount(policy types.ConflictPolicy, dirtyCountByDest map[string]int, destPath string) int {

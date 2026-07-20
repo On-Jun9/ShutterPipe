@@ -1,6 +1,7 @@
 package state
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -26,6 +27,36 @@ type ProcessedFile struct {
 	SourceHash            string    `json:"source_hash,omitempty"`
 	DestHash              string    `json:"dest_hash,omitempty"`
 	Superseded            bool      `json:"superseded,omitempty"`
+	// ConfigFingerprint captures the destination-shaping settings in effect when
+	// this record was written. A record is only reusable when the current run's
+	// settings resolve to the same destination layout, so changing the target
+	// directory or organize strategy correctly forces a re-backup instead of
+	// silently skipping the file against a stale destination.
+	ConfigFingerprint string `json:"config_fingerprint,omitempty"`
+	// Sidecar* capture the identity of the metadata sidecar (e.g. a video's
+	// M01.XML) that supplied the file's classification. If the sidecar appears or
+	// changes after this record was written, the destination may differ, so the
+	// file must be reprocessed instead of skipped against its old location.
+	SidecarPresent         bool  `json:"sidecar_present,omitempty"`
+	SidecarSize            int64 `json:"sidecar_size,omitempty"`
+	SidecarModTimeUnixNano int64 `json:"sidecar_mod_time_unix_nano,omitempty"`
+}
+
+// SourceContext bundles the inputs, beyond the source file's own identity, that
+// determine where the file is published. A change in any of them means a prior
+// state record must not shortcut the run.
+type SourceContext struct {
+	ConfigFingerprint      string
+	SidecarPresent         bool
+	SidecarSize            int64
+	SidecarModTimeUnixNano int64
+}
+
+func (c SourceContext) matchesRecord(record ProcessedFile) bool {
+	return record.ConfigFingerprint == c.ConfigFingerprint &&
+		record.SidecarPresent == c.SidecarPresent &&
+		record.SidecarSize == c.SidecarSize &&
+		record.SidecarModTimeUnixNano == c.SidecarModTimeUnixNano
 }
 
 type State struct {
@@ -95,12 +126,13 @@ func (s *State) Save() error {
 	return syncStateDir(dir)
 }
 
-func (s *State) IsEntryProcessed(entry types.FileEntry, hashVerify bool) bool {
+func (s *State) IsEntryProcessed(ctx context.Context, entry types.FileEntry, hashVerify bool, sctx SourceContext) bool {
 	s.mu.RLock()
 	record, ok := s.Processed[entry.Path]
 	s.mu.RUnlock()
 	if !ok || record.IdentityVersion < 2 || record.Size != entry.Size ||
-		record.SourceModTimeUnixNano != entry.ModTime.UnixNano() || record.DestPath == "" {
+		record.SourceModTimeUnixNano != entry.ModTime.UnixNano() || record.DestPath == "" ||
+		!sctx.matchesRecord(record) {
 		return false
 	}
 	destInfo, err := os.Stat(record.DestPath)
@@ -114,34 +146,34 @@ func (s *State) IsEntryProcessed(entry types.FileEntry, hashVerify bool) bool {
 	if record.SourceHash == "" || record.DestHash == "" {
 		return false
 	}
-	sourceHash, _, err := hashStableFile(entry.Path)
+	sourceHash, _, err := hashStableFileWithContext(ctx, entry.Path)
 	if err != nil || sourceHash != record.SourceHash {
 		return false
 	}
-	destHash, _, err := hashStableFile(record.DestPath)
+	destHash, _, err := hashStableFileWithContext(ctx, record.DestPath)
 	return err == nil && destHash == record.DestHash
 }
 
-func (s *State) MarkProcessedEntry(entry types.FileEntry, destPath string, hashVerify bool) error {
-	return s.markProcessedEntry(entry, destPath, hashVerify, nil, false, false)
+func (s *State) MarkProcessedEntry(ctx context.Context, entry types.FileEntry, destPath string, hashVerify bool, sctx SourceContext) error {
+	return s.markProcessedEntry(ctx, entry, destPath, hashVerify, nil, false, false, sctx)
 }
 
 // MarkProcessedEntryWithVerifiedHash binds the state record to the exact
 // source snapshot that the copier verified before publishing the destination.
-func (s *State) MarkProcessedEntryWithVerifiedHash(entry types.FileEntry, destPath string, verifiedHash []byte) error {
+func (s *State) MarkProcessedEntryWithVerifiedHash(ctx context.Context, entry types.FileEntry, destPath string, verifiedHash []byte, sctx SourceContext) error {
 	if len(verifiedHash) != sha256.Size {
 		return fmt.Errorf("verified source hash is required for state commit: %s", entry.Path)
 	}
-	return s.markProcessedEntry(entry, destPath, true, verifiedHash, true, false)
+	return s.markProcessedEntry(ctx, entry, destPath, true, verifiedHash, true, false, sctx)
 }
 
 // MarkSupersededEntry records an overwrite loser whose content is intentionally
 // represented by the deterministic winner at destPath.
-func (s *State) MarkSupersededEntry(entry types.FileEntry, destPath string, hashVerify bool) error {
-	return s.markProcessedEntry(entry, destPath, hashVerify, nil, false, true)
+func (s *State) MarkSupersededEntry(ctx context.Context, entry types.FileEntry, destPath string, hashVerify bool, sctx SourceContext) error {
+	return s.markProcessedEntry(ctx, entry, destPath, hashVerify, nil, false, true, sctx)
 }
 
-func (s *State) markProcessedEntry(entry types.FileEntry, destPath string, hashVerify bool, verifiedHash []byte, requireVerifiedHash, superseded bool) error {
+func (s *State) markProcessedEntry(ctx context.Context, entry types.FileEntry, destPath string, hashVerify bool, verifiedHash []byte, requireVerifiedHash, superseded bool, sctx SourceContext) error {
 	sourceInfo, err := os.Stat(entry.Path)
 	if err != nil {
 		return err
@@ -158,11 +190,11 @@ func (s *State) markProcessedEntry(entry types.FileEntry, destPath string, hashV
 	}
 	var sourceHash, destHash string
 	if hashVerify {
-		sourceHash, sourceInfo, err = hashStableFile(entry.Path)
+		sourceHash, sourceInfo, err = hashStableFileWithContext(ctx, entry.Path)
 		if err != nil {
 			return err
 		}
-		destHash, destInfo, err = hashStableFile(destPath)
+		destHash, destInfo, err = hashStableFileWithContext(ctx, destPath)
 		if err != nil {
 			return err
 		}
@@ -183,13 +215,20 @@ func (s *State) markProcessedEntry(entry types.FileEntry, destPath string, hashV
 		IdentityVersion: 2, SourceModTimeUnixNano: sourceInfo.ModTime().UnixNano(),
 		DestSize: destInfo.Size(), DestModTimeUnixNano: destInfo.ModTime().UnixNano(),
 		SourceHash: sourceHash, DestHash: destHash, Superseded: superseded,
+		ConfigFingerprint:      sctx.ConfigFingerprint,
+		SidecarPresent:         sctx.SidecarPresent,
+		SidecarSize:            sctx.SidecarSize,
+		SidecarModTimeUnixNano: sctx.SidecarModTimeUnixNano,
 	}
 	s.LastRun = now
 	s.mu.Unlock()
 	return nil
 }
 
-func hashStableFile(path string) (string, os.FileInfo, error) {
+func hashStableFileWithContext(ctx context.Context, path string) (string, os.FileInfo, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return "", nil, err
@@ -200,8 +239,23 @@ func hashStableFile(path string) (string, os.FileInfo, error) {
 		return "", nil, err
 	}
 	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", nil, err
+	buf := make([]byte, 1024*1024)
+	for {
+		if err := ctx.Err(); err != nil {
+			return "", nil, err
+		}
+		n, readErr := f.Read(buf)
+		if n > 0 {
+			if _, err := h.Write(buf[:n]); err != nil {
+				return "", nil, err
+			}
+		}
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			return "", nil, readErr
+		}
 	}
 	after, err := f.Stat()
 	if err != nil {

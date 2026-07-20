@@ -1,7 +1,9 @@
 package state
 
 import (
+	"context"
 	"crypto/sha256"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -129,10 +131,10 @@ func TestStateEntryIdentityDetectsSameSizeSourceAndDestinationChanges(t *testing
 	}
 	entry := types.FileEntry{Path: sourcePath, Size: sourceInfo.Size(), ModTime: sourceInfo.ModTime()}
 	st := New(filepath.Join(tmpDir, "state.json"))
-	if err := st.MarkProcessedEntry(entry, destPath, false); err != nil {
+	if err := st.MarkProcessedEntry(context.Background(), entry, destPath, false, SourceContext{}); err != nil {
 		t.Fatal(err)
 	}
-	if !st.IsEntryProcessed(entry, false) {
+	if !st.IsEntryProcessed(context.Background(), entry, false, SourceContext{}) {
 		t.Fatal("fresh source and destination were not recognized")
 	}
 
@@ -145,7 +147,7 @@ func TestStateEntryIdentityDetectsSameSizeSourceAndDestinationChanges(t *testing
 	}
 	changedSource := entry
 	changedSource.ModTime = future
-	if st.IsEntryProcessed(changedSource, false) {
+	if st.IsEntryProcessed(context.Background(), changedSource, false, SourceContext{}) {
 		t.Fatal("same-size source modification remained processed")
 	}
 
@@ -158,7 +160,7 @@ func TestStateEntryIdentityDetectsSameSizeSourceAndDestinationChanges(t *testing
 	if err := os.Chtimes(destPath, future, future); err != nil {
 		t.Fatal(err)
 	}
-	if st.IsEntryProcessed(entry, false) {
+	if st.IsEntryProcessed(context.Background(), entry, false, SourceContext{}) {
 		t.Fatal("same-size destination modification remained processed")
 	}
 }
@@ -179,7 +181,7 @@ func TestStateHashIdentityDetectsPreservedTimestampContentChange(t *testing.T) {
 	}
 	entry := types.FileEntry{Path: sourcePath, Size: sourceInfo.Size(), ModTime: sourceInfo.ModTime()}
 	st := New(filepath.Join(tmpDir, "state.json"))
-	if err := st.MarkProcessedEntry(entry, destPath, true); err != nil {
+	if err := st.MarkProcessedEntry(context.Background(), entry, destPath, true, SourceContext{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(sourcePath, []byte("change"), 0644); err != nil {
@@ -188,7 +190,7 @@ func TestStateHashIdentityDetectsPreservedTimestampContentChange(t *testing.T) {
 	if err := os.Chtimes(sourcePath, entry.ModTime, entry.ModTime); err != nil {
 		t.Fatal(err)
 	}
-	if st.IsEntryProcessed(entry, true) {
+	if st.IsEntryProcessed(context.Background(), entry, true, SourceContext{}) {
 		t.Fatal("hash mode missed same-size source content change with preserved mtime")
 	}
 }
@@ -219,7 +221,7 @@ func TestStateVerifiedHashRejectsSourceChangedBeforeCommitWithPreservedIdentity(
 	}
 
 	st := New(filepath.Join(tmpDir, "state.json"))
-	err = st.MarkProcessedEntryWithVerifiedHash(entry, destPath, verifiedHash[:])
+	err = st.MarkProcessedEntryWithVerifiedHash(context.Background(), entry, destPath, verifiedHash[:], SourceContext{})
 	if err == nil || !strings.Contains(err.Error(), "verified snapshot changed") {
 		t.Fatalf("expected verified snapshot mismatch, got %v", err)
 	}
@@ -244,10 +246,10 @@ func TestStateHashCommitAllowsMismatchOnlyForExplicitOverwriteSupersession(t *te
 	}
 	entry := types.FileEntry{Path: sourcePath, Size: sourceInfo.Size(), ModTime: sourceInfo.ModTime()}
 	st := New(filepath.Join(tmpDir, "state.json"))
-	if err := st.MarkProcessedEntry(entry, destPath, true); err == nil || !strings.Contains(err.Error(), "source and destination differ") {
+	if err := st.MarkProcessedEntry(context.Background(), entry, destPath, true, SourceContext{}); err == nil || !strings.Contains(err.Error(), "source and destination differ") {
 		t.Fatalf("ordinary hash state commit accepted different content: %v", err)
 	}
-	if err := st.MarkSupersededEntry(entry, destPath, true); err != nil {
+	if err := st.MarkSupersededEntry(context.Background(), entry, destPath, true, SourceContext{}); err != nil {
 		t.Fatalf("explicit overwrite supersession was rejected: %v", err)
 	}
 	if record := st.Processed[sourcePath]; !record.Superseded {
@@ -255,11 +257,74 @@ func TestStateHashCommitAllowsMismatchOnlyForExplicitOverwriteSupersession(t *te
 	}
 }
 
+// TestStateConfigFingerprintChangeForcesReprocess는 목적지/분류 설정이 바뀌면
+// 과거 레코드가 새 목적지 백업을 건너뛰게 만들지 않는지 검증한다.
+func TestStateConfigFingerprintChangeForcesReprocess(t *testing.T) {
+	tmpDir := t.TempDir()
+	sourcePath := filepath.Join(tmpDir, "source.jpg")
+	destPath := filepath.Join(tmpDir, "dest.jpg")
+	if err := os.WriteFile(sourcePath, []byte("data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(destPath, []byte("data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(sourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := types.FileEntry{Path: sourcePath, Size: info.Size(), ModTime: info.ModTime()}
+	st := New(filepath.Join(tmpDir, "state.json"))
+	if err := st.MarkProcessedEntry(context.Background(), entry, destPath, false, SourceContext{ConfigFingerprint: "dest-A"}); err != nil {
+		t.Fatal(err)
+	}
+	if !st.IsEntryProcessed(context.Background(), entry, false, SourceContext{ConfigFingerprint: "dest-A"}) {
+		t.Fatal("동일한 설정 fingerprint는 처리 완료로 인식되어야 한다")
+	}
+	if st.IsEntryProcessed(context.Background(), entry, false, SourceContext{ConfigFingerprint: "dest-B"}) {
+		t.Fatal("목적지/설정 fingerprint가 바뀌면 재처리가 강제되어야 한다")
+	}
+}
+
+// TestStateHashingHonorsContextCancellation은 hash_verify 재해싱이 취소 신호를
+// 전파해 느린 NAS/대용량 파일에서 취소가 지연되지 않는지 검증한다.
+func TestStateHashingHonorsContextCancellation(t *testing.T) {
+	tmpDir := t.TempDir()
+	sourcePath := filepath.Join(tmpDir, "source.jpg")
+	destPath := filepath.Join(tmpDir, "dest.jpg")
+	// 1MB 버퍼보다 큰 파일이라야 취소 확인이 여러 반복에 걸쳐 유효하다.
+	blob := make([]byte, 2*1024*1024)
+	if err := os.WriteFile(sourcePath, blob, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(destPath, blob, 0644); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(sourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := types.FileEntry{Path: sourcePath, Size: info.Size(), ModTime: info.ModTime()}
+	st := New(filepath.Join(tmpDir, "state.json"))
+	if err := st.MarkProcessedEntry(context.Background(), entry, destPath, true, SourceContext{}); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if st.IsEntryProcessed(ctx, entry, true, SourceContext{}) {
+		t.Fatal("취소된 context에서 재해싱 확인은 완료로 판정되면 안 된다")
+	}
+	if err := st.MarkSupersededEntry(ctx, entry, destPath, true, SourceContext{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("취소된 context는 상태 커밋 해싱을 중단해야 한다, got %v", err)
+	}
+}
+
 func TestStateLegacyRecordIsDirtyForIdentityMigration(t *testing.T) {
 	st := New(filepath.Join(t.TempDir(), "state.json"))
 	st.MarkProcessed("/src/legacy.jpg", 7, "/dest/legacy.jpg")
 	entry := types.FileEntry{Path: "/src/legacy.jpg", Size: 7, ModTime: time.Now()}
-	if st.IsEntryProcessed(entry, false) {
+	if st.IsEntryProcessed(context.Background(), entry, false, SourceContext{}) {
 		t.Fatal("legacy path-size record bypassed identity migration")
 	}
 }

@@ -524,12 +524,12 @@ func TestPipelineRun_NoTasksPathWhenFileAlreadyProcessed(t *testing.T) {
 
 	cfg := newTestConfig(tmpDir, sourceDir, destDir)
 	st := state.New(cfg.StateFile)
-	if err := st.MarkProcessedEntry(types.FileEntry{
+	if err := st.MarkProcessedEntry(context.Background(), types.FileEntry{
 		Path:    srcPath,
 		Name:    filepath.Base(srcPath),
 		Size:    srcInfo.Size(),
 		ModTime: srcInfo.ModTime(),
-	}, destPath, false); err != nil {
+	}, destPath, false, state.SourceContext{ConfigFingerprint: stateFingerprint(cfg)}); err != nil {
 		t.Fatalf("failed to preload state entry: %v", err)
 	}
 	if err := st.Save(); err != nil {
@@ -1853,5 +1853,471 @@ func TestPipelineRun_CancelCleanupFailureIsLoggedAndRecordedAsCanceledFailure(t 
 	}
 	if len(history.Entries) == 0 || history.Entries[0].Status != types.BackupStatusCanceled || history.Entries[0].Summary.Failed != 1 {
 		t.Fatalf("expected canceled history with cleanup failure, got %+v", history.Entries)
+	}
+}
+
+type cancelDuringStateCommitCopier struct {
+	cancel context.CancelFunc
+}
+
+func (c cancelDuringStateCommitCopier) CopyAll(_ context.Context, tasks []types.CopyTask, results chan<- copier.CopyResult) {
+	defer close(results)
+	for _, task := range tasks {
+		original, err := os.ReadFile(task.Source.Path)
+		if err != nil {
+			results <- copier.CopyResult{Task: task, Error: err}
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(task.DestPath), 0755); err != nil {
+			results <- copier.CopyResult{Task: task, Error: err}
+			continue
+		}
+		if err := os.WriteFile(task.DestPath, original, 0644); err != nil {
+			results <- copier.CopyResult{Task: task, Error: err}
+			continue
+		}
+		verifiedHash := sha256.Sum256(original)
+		task.Status = types.TaskStatusCompleted
+		task.Action = types.CopyActionCopied
+		// 복사는 성공했지만 state 커밋 직전 취소가 도착한 상황을 재현한다.
+		// resultChan이 버퍼링되어 있어 cancel → send 순서가 보장된다.
+		c.cancel()
+		results <- copier.CopyResult{Task: task, VerifiedSourceHash: verifiedHash[:]}
+	}
+}
+
+// TestPipelineRun_StateCommitCancellationEndsAsCanceled는 복사 완료 후 state 해시
+// 커밋 중 취소가 도착하면 complete가 아니라 cancelled로 종료되고, 상태가 기록되지
+// 않아 다음 실행에서 재백업되는지 검증한다. (P1: state commit 취소 판정)
+func TestPipelineRun_StateCommitCancellationEndsAsCanceled(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", filepath.Join(tmpDir, "home"))
+	sourceDir := filepath.Join(tmpDir, "src")
+	destDir := filepath.Join(tmpDir, "dest")
+	if err := os.MkdirAll(sourceDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(destDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceDir, "photo.jpg"), []byte("AAAA"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := newTestConfig(tmpDir, sourceDir, destDir)
+	cfg.HashVerify = true
+	p, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	p.copier = cancelDuringStateCommitCopier{cancel: cancel}
+
+	var terminal ProgressUpdate
+	p.SetProgressCallback(func(update ProgressUpdate) {
+		if update.Type == "complete" || update.Type == "error" || update.Type == "cancelled" {
+			terminal = update
+		}
+	})
+
+	_, runErr := p.RunWithContext(ctx)
+	if !errors.Is(runErr, ErrRunCanceled) {
+		t.Fatalf("state 커밋 취소는 취소로 종료되어야 한다, got %v", runErr)
+	}
+	if terminal.Type == "complete" {
+		t.Fatal("취소된 실행이 complete로 종료되었다")
+	}
+	reloaded, err := state.Load(cfg.StateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reloaded.Processed) != 0 {
+		t.Fatalf("취소됐는데 처리 상태가 기록됨: %#v", reloaded.Processed)
+	}
+}
+
+// TestPipelineRun_SidecarAppearanceForcesReclassification은 비디오 백업 후 촬영일을
+// 담은 XML sidecar가 나중에 생기면, state로 건너뛰지 않고 촬영일 디렉터리로 재분류
+// 되는지 검증한다. (P1: state가 planned destination을 무시하고 생략하던 문제)
+func TestPipelineRun_SidecarAppearanceForcesReclassification(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", filepath.Join(tmpDir, "home"))
+	sourceDir := filepath.Join(tmpDir, "src")
+	destDir := filepath.Join(tmpDir, "dest")
+	for _, d := range []string{sourceDir, destDir} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	videoPath := filepath.Join(sourceDir, "clip.mp4")
+	if err := os.WriteFile(videoPath, []byte("video-bytes"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := newTestConfig(tmpDir, sourceDir, destDir)
+	cfg.IncludeExtensions = []string{"mp4"}
+
+	run := func() *types.RunSummary {
+		p, err := New(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer p.Close()
+		summary, err := p.Run()
+		if err != nil {
+			t.Fatalf("run failed: %v", err)
+		}
+		return summary
+	}
+
+	// 1) sidecar 없음 → unclassified로 백업된다.
+	first := run()
+	if first.Copied != 1 {
+		t.Fatalf("첫 실행은 비디오를 복사해야 한다: %+v", *first)
+	}
+	if _, err := os.Stat(filepath.Join(destDir, "unclassified", "clip.mp4")); err != nil {
+		t.Fatalf("비디오가 unclassified에 있어야 한다: %v", err)
+	}
+
+	// 2) 변화 없음 → state로 건너뛴다(빠른 경로 유지 확인).
+	second := run()
+	if second.TotalFiles != 0 || second.Copied != 0 {
+		t.Fatalf("변화 없는 재실행은 state로 건너뛰어야 한다: %+v", *second)
+	}
+
+	// 3) 촬영일을 담은 sidecar 추가 → 재분류가 강제된다.
+	sidecar := filepath.Join(sourceDir, "clipM01.XML")
+	xmlBody := `<NonRealTimeMeta><CreationDate value="2023-05-15T10:00:00Z"/></NonRealTimeMeta>`
+	if err := os.WriteFile(sidecar, []byte(xmlBody), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	third := run()
+	if third.TotalFiles != 1 || third.Copied != 1 {
+		t.Fatalf("sidecar 추가는 재처리를 강제해야 한다: %+v", *third)
+	}
+	if _, err := os.Stat(filepath.Join(destDir, "2023", "05", "15", "clip.mp4")); err != nil {
+		t.Fatalf("촬영일 경로로 재분류되지 않았다: %v", err)
+	}
+}
+
+type sidecarCreatingCopier struct {
+	sidecarPath string
+	xmlBody     string
+}
+
+func (c sidecarCreatingCopier) CopyAll(_ context.Context, tasks []types.CopyTask, results chan<- copier.CopyResult) {
+	defer close(results)
+	for _, task := range tasks {
+		original, err := os.ReadFile(task.Source.Path)
+		if err != nil {
+			results <- copier.CopyResult{Task: task, Error: err}
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(task.DestPath), 0755); err != nil {
+			results <- copier.CopyResult{Task: task, Error: err}
+			continue
+		}
+		if err := os.WriteFile(task.DestPath, original, 0644); err != nil {
+			results <- copier.CopyResult{Task: task, Error: err}
+			continue
+		}
+		// 복사 도중 sidecar가 생성되는 상황을 재현한다(Plan 이후 시점).
+		if err := os.WriteFile(c.sidecarPath, []byte(c.xmlBody), 0644); err != nil {
+			results <- copier.CopyResult{Task: task, Error: err}
+			continue
+		}
+		task.Status = types.TaskStatusCompleted
+		task.Action = types.CopyActionCopied
+		results <- copier.CopyResult{Task: task}
+	}
+}
+
+// TestPipelineRun_SidecarChangeDuringRunIsDetectedNextRun은 처리 중 sidecar가 생겨
+// Plan 시점(없음)과 commit 시점(있음)이 어긋나도, state에 캡처 시점(없음) identity가
+// 기록되어 다음 실행에서 dirty로 감지·재분류되는지 검증한다. (P1: SourceContext TOCTOU)
+func TestPipelineRun_SidecarChangeDuringRunIsDetectedNextRun(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", filepath.Join(tmpDir, "home"))
+	sourceDir := filepath.Join(tmpDir, "src")
+	destDir := filepath.Join(tmpDir, "dest")
+	for _, d := range []string{sourceDir, destDir} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(sourceDir, "clip.mp4"), []byte("video-bytes"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	sidecar := filepath.Join(sourceDir, "clipM01.XML")
+	xmlBody := `<NonRealTimeMeta><CreationDate value="2023-05-15T10:00:00Z"/></NonRealTimeMeta>`
+
+	cfg := newTestConfig(tmpDir, sourceDir, destDir)
+	cfg.IncludeExtensions = []string{"mp4"}
+
+	// 1) sidecar 없이 시작하지만 복사 도중 sidecar가 생성된다.
+	p1, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p1.copier = sidecarCreatingCopier{sidecarPath: sidecar, xmlBody: xmlBody}
+	first, err := p1.Run()
+	p1.Close()
+	if err != nil || first.Copied != 1 {
+		t.Fatalf("첫 실행에서 복사가 실패: err=%v summary=%+v", err, first)
+	}
+	if _, err := os.Stat(sidecar); err != nil {
+		t.Fatalf("sidecar가 복사 도중 생성되어야 한다: %v", err)
+	}
+
+	// 2) 이제 sidecar가 존재한다. 실제 copier로 재실행하면 state가 캡처 시점(없음)으로
+	//    기록되어 있어야 하므로 dirty로 감지되고 촬영일로 재분류된다.
+	p2, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p2.Close()
+	second, err := p2.Run()
+	if err != nil {
+		t.Fatalf("두 번째 실행 실패: %v", err)
+	}
+	if second.TotalFiles != 1 || second.Copied != 1 {
+		t.Fatalf("실행 중 생긴 sidecar는 다음 실행에서 재처리를 강제해야 한다: %+v", *second)
+	}
+	if _, err := os.Stat(filepath.Join(destDir, "2023", "05", "15", "clip.mp4")); err != nil {
+		t.Fatalf("촬영일 경로로 재분류되지 않았다: %v", err)
+	}
+}
+
+// TestPipelineRun_DedupReadErrorFailsFile은 dedup 검사의 비취소 I/O 오류가 조용한
+// skip이 아니라 파일 실패로 전파되는지 검증한다. (P1: dedup 오류 → skip 성공)
+func TestPipelineRun_DedupReadErrorFailsFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", filepath.Join(tmpDir, "home"))
+	sourceDir := filepath.Join(tmpDir, "src")
+	destDir := filepath.Join(tmpDir, "dest")
+	for _, d := range []string{sourceDir, destDir} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(sourceDir, "photo.jpg"), []byte("photo"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// 계획 목적지(unclassified/photo.jpg) 자리에 디렉터리를 만들어 hash dedup의
+	// 목적지 읽기가 실패하게 한다.
+	destAsDir := filepath.Join(destDir, "unclassified", "photo.jpg")
+	if err := os.MkdirAll(destAsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := newTestConfig(tmpDir, sourceDir, destDir)
+	cfg.DedupMethod = types.DedupMethodHash
+	p, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+
+	summary, err := p.Run()
+	if !errors.Is(err, ErrRunFailed) {
+		t.Fatalf("dedup 읽기 오류는 실패 실행이어야 한다, got %v", err)
+	}
+	if summary.Failed != 1 || summary.Skipped != 0 {
+		t.Fatalf("dedup 오류는 skip이 아니라 failed여야 한다: %+v", *summary)
+	}
+}
+
+// TestPipelineRun_DedupSkipUpgradesLegacyState는 fingerprint 없는 기존 레코드가
+// dedup으로 건너뛰어질 때 새 schema로 승격되어, 다음 실행에서 빠른 state skip이
+// 되는지 검증한다. (재처리 회귀 방지)
+func TestPipelineRun_DedupSkipUpgradesLegacyState(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", filepath.Join(tmpDir, "home"))
+	sourceDir := filepath.Join(tmpDir, "src")
+	destDir := filepath.Join(tmpDir, "dest")
+	for _, d := range []string{sourceDir, destDir} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	content := []byte("photo-bytes")
+	srcPath := filepath.Join(sourceDir, "photo.jpg")
+	if err := os.WriteFile(srcPath, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+	destPath := filepath.Join(destDir, "unclassified", "photo.jpg")
+	if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(destPath, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := newTestConfig(tmpDir, sourceDir, destDir)
+	// fingerprint/sidecar 필드가 없는 legacy 레코드를 미리 넣는다(빈 SourceContext).
+	srcInfo, err := os.Stat(srcPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := state.New(cfg.StateFile)
+	if err := st.MarkProcessedEntry(context.Background(), types.FileEntry{
+		Path: srcPath, Name: "photo.jpg", Size: srcInfo.Size(), ModTime: srcInfo.ModTime(),
+	}, destPath, false, state.SourceContext{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1) legacy 레코드는 fingerprint 불일치로 dirty → dedup으로 skip되면서 state 승격.
+	p1, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := p1.Run()
+	p1.Close()
+	if err != nil {
+		t.Fatalf("첫 실행 실패: %v", err)
+	}
+	if first.Skipped != 1 {
+		t.Fatalf("중복 파일은 skip되어야 한다: %+v", *first)
+	}
+
+	// 2) 승격된 레코드로 재실행하면 metadata/dedup 없이 빠른 state skip이어야 한다.
+	p2, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p2.Close()
+	second, err := p2.Run()
+	if err != nil {
+		t.Fatalf("두 번째 실행 실패: %v", err)
+	}
+	if second.TotalFiles != 0 || second.Skipped != 0 || second.Copied != 0 {
+		t.Fatalf("승격 후에는 빠른 state skip이어야 한다(집계 0): %+v", *second)
+	}
+}
+
+// TestPipelineRun_OverwritePublishesNewFile은 overwrite 정책에서 목적지가 비어 있는
+// 신규 파일도 정상 publish되고(Action=Copied), 기존 파일은 Overwritten으로 집계되는지
+// 검증한다. overwrite는 no-replace 프리미티브가 없는 파일시스템의 문서화된 우회
+// 경로이므로 신규 파일에서도 replaceFile publish 경로를 타야 한다. (P1)
+func TestPipelineRun_OverwritePublishesNewFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", filepath.Join(tmpDir, "home"))
+	sourceDir := filepath.Join(tmpDir, "src")
+	destDir := filepath.Join(tmpDir, "dest")
+	for _, d := range []string{sourceDir, destDir} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(sourceDir, "photo.jpg"), []byte("photo"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := newTestConfig(tmpDir, sourceDir, destDir)
+	cfg.ConflictPolicy = types.ConflictPolicyOverwrite
+
+	// 1) 빈 목적지 신규 파일 → Copied로 집계되고 파일이 생성되어야 한다.
+	p1, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := p1.Run()
+	p1.Close()
+	if err != nil {
+		t.Fatalf("overwrite 신규 파일 실행 실패: %v", err)
+	}
+	if first.Copied != 1 || first.Overwritten != 0 {
+		t.Fatalf("신규 파일은 Copied로 집계되어야 한다: %+v", *first)
+	}
+	published := filepath.Join(destDir, "unclassified", "photo.jpg")
+	if _, err := os.Stat(published); err != nil {
+		t.Fatalf("신규 파일이 publish되지 않았다: %v", err)
+	}
+
+	// 2) 원본을 바꾸고 재실행 → 기존 목적지를 Overwritten으로 덮어써야 한다.
+	if err := os.WriteFile(filepath.Join(sourceDir, "photo.jpg"), []byte("photo-v2"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	p2, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p2.Close()
+	second, err := p2.Run()
+	if err != nil {
+		t.Fatalf("overwrite 재실행 실패: %v", err)
+	}
+	if second.Overwritten != 1 {
+		t.Fatalf("기존 파일은 Overwritten으로 집계되어야 한다: %+v", *second)
+	}
+	if data, err := os.ReadFile(published); err != nil || string(data) != "photo-v2" {
+		t.Fatalf("덮어쓰기 내용 불일치: data=%q err=%v", data, err)
+	}
+}
+
+// TestPipelineRun_PolicyChangeReprocessesViaFingerprint는 충돌 정책을 바꾸면 기존
+// state fast-skip에 막히지 않고 새 정책으로 재처리되는지 검증한다. (P1: fingerprint에
+// ConflictPolicy/DedupMethod 포함)
+func TestPipelineRun_PolicyChangeReprocessesViaFingerprint(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", filepath.Join(tmpDir, "home"))
+	sourceDir := filepath.Join(tmpDir, "src")
+	destDir := filepath.Join(tmpDir, "dest")
+	for _, d := range []string{sourceDir, destDir} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(sourceDir, "photo.jpg"), []byte("new-content"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// 계획 목적지에 외부 파일이 이미 존재해 충돌을 만든다.
+	destPath := filepath.Join(destDir, "unclassified", "photo.jpg")
+	if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(destPath, []byte("existing"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1) rename 정책: 충돌 파일은 photo_1.jpg로 백업된다.
+	cfgRename := newTestConfig(tmpDir, sourceDir, destDir)
+	cfgRename.ConflictPolicy = types.ConflictPolicyRename
+	p1, err := New(cfgRename)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := p1.Run()
+	p1.Close()
+	if err != nil {
+		t.Fatalf("rename 실행 실패: %v", err)
+	}
+	if first.Renamed != 1 {
+		t.Fatalf("rename 정책은 충돌을 rename해야 한다: %+v", *first)
+	}
+
+	// 2) overwrite 정책으로 전환: state에 막히지 않고 원본 목적지를 덮어써야 한다.
+	cfgOverwrite := newTestConfig(tmpDir, sourceDir, destDir)
+	cfgOverwrite.ConflictPolicy = types.ConflictPolicyOverwrite
+	p2, err := New(cfgOverwrite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p2.Close()
+	second, err := p2.Run()
+	if err != nil {
+		t.Fatalf("overwrite 실행 실패: %v", err)
+	}
+	if second.TotalFiles != 1 {
+		t.Fatalf("정책 변경은 재처리를 강제해야 한다(TotalFiles=1): %+v", *second)
+	}
+	if data, err := os.ReadFile(destPath); err != nil || string(data) != "new-content" {
+		t.Fatalf("overwrite로 목적지가 갱신되지 않았다: data=%q err=%v", data, err)
 	}
 }

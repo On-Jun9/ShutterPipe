@@ -9,6 +9,21 @@ const coreSource = fs.readFileSync(path.join(projectRoot, 'web/static/js/core.js
 const backupSource = fs.readFileSync(path.join(projectRoot, 'web/static/js/backup.js'), 'utf8');
 const userDataApiSource = fs.readFileSync(path.join(projectRoot, 'web/static/js/userdata-api.js'), 'utf8');
 
+// 각 테스트가 만든 컨텍스트를 추적해, 테스트가 남긴 durable observer(무기한 폴링
+// 루프)를 다음 테스트 전에 반드시 중단시킨다. token을 올리면 관찰자는 다음 회차의
+// token 검사에서 스스로 종료한다. 이 정리가 없으면 종료 안 된 관찰자가 microtask를
+// 독점해 이후 setImmediate 기반 테스트를 굶긴다.
+const createdContexts = [];
+
+test.afterEach(() => {
+    for (const ctx of createdContexts) {
+        try {
+            vm.runInContext('statusConvergenceToken++; runningObserverToken = null;', ctx);
+        } catch (_error) { /* 컨텍스트가 유효하지 않으면 무시 */ }
+    }
+    createdContexts.length = 0;
+});
+
 function createContext(localStorage = null) {
     const elements = new Map();
     const getElement = (id) => {
@@ -36,6 +51,9 @@ function createContext(localStorage = null) {
         formatBytes: () => '',
         formatDuration: () => '',
         formatSpeed: () => '',
+        // 테스트에서는 backoff를 즉시 실행해 상태 수렴 루프를 결정적으로 구동한다.
+        setTimeout: (fn) => { fn(); return 0; },
+        clearTimeout: () => {},
         window: {
             addEventListener() {},
             location: { host: 'localhost:8080', protocol: 'http:' },
@@ -45,19 +63,30 @@ function createContext(localStorage = null) {
 
     vm.runInContext(coreSource, context);
     vm.runInContext(backupSource, context);
+    createdContexts.push(context);
     return { context, getElement };
 }
 
-test('cancel request without WebSocket keeps run state uncertain', async () => {
+test('cancel without WebSocket recovers via reconnect and status sync', async () => {
     const { context, getElement } = createContext();
-    vm.runInContext('isRunning = true; runStartPending = false; runRequestSent = true; ws = null;', context);
+    // 취소는 성공하지만 WebSocket이 없어 terminal 이벤트를 받을 수 없다.
+    context.cancelBackupRunOnServer = async () => ({ success: true, status: 200, runId: 'run-1' });
+    // 재연결은 실패하고, 상태 조회가 취소 완료를 알려 UI 잠김을 해소한다.
+    vm.runInContext('connectWebSocket = async () => { throw new Error("no ws"); };', context);
+    context.getBackupRunStatusFromServer = async () => ({
+        success: true, status: 200, runStatus: 'cancelled', runId: 'run-1',
+        message: '백업이 취소되었습니다.',
+        summary: { Duration: 0, BytesCopied: 0, BytesPerSecond: 0, ScannedFiles: 0, TotalFiles: 0,
+            Copied: 0, Skipped: 0, Renamed: 0, Overwritten: 0, Quarantined: 0, Failed: 0, Unclassified: 0 }
+    });
+    vm.runInContext(`beginTrackingRun('run-1'); runStartPending = false; runRequestSent = true; ws = null;`, context);
     getElement('startBtn').disabled = true;
 
     await vm.runInContext('cancelBackup()', context);
 
-    assert.equal(vm.runInContext('isRunning', context), true);
-    assert.equal(vm.runInContext('runCancelRequested', context), true);
-    assert.equal(getElement('startBtn').disabled, true);
+    // terminal 상태로 복구되어 UI 잠김이 풀려야 한다.
+    assert.equal(vm.runInContext('isRunning', context), false);
+    assert.equal(getElement('startBtn').disabled, false);
     assert.equal(getElement('cancelBtn').disabled, true);
 });
 
@@ -86,6 +115,10 @@ test('WebSocket close during cancellation does not mark run completed', () => {
 
 test('WebSocket disconnect keeps HTTP cancellation available for a running backup', () => {
     const { context, getElement } = createContext();
+    // 관찰자가 붙기 전 동기 시점의 상태를 검사한다. 재연결/조회는 실패시켜 관찰자가
+    // 즉시 폴링 대기로 들어가되(다음 async 회차) 이 테스트의 동기 단언에는 영향 없게 한다.
+    vm.runInContext('connectWebSocket = async () => { throw new Error("no ws"); };', context);
+    context.getBackupRunStatusFromServer = async () => ({ success: false, error: 'network' });
     vm.runInContext(`
         isRunning = true;
         runStatus = 'running';
@@ -98,6 +131,10 @@ test('WebSocket disconnect keeps HTTP cancellation available for a running backu
 
     assert.equal(vm.runInContext('isRunning', context), true);
     assert.equal(getElement('cancelBtn').disabled, false);
+    // 관찰자 lease가 잡혀 있어야 한다(정상 실행 중 WS 종료 → terminal 관찰 시작).
+    assert.notEqual(vm.runInContext('runningObserverToken', context), null);
+    // 이 테스트가 남긴 관찰자를 정리해 다음 테스트를 굶기지 않는다.
+    vm.runInContext('statusConvergenceToken++; runningObserverToken = null;', context);
 });
 
 test('terminal WebSocket event cannot be overwritten by a later cancel response', async () => {
@@ -312,7 +349,8 @@ test('cancel response revision rejects older progress updates', async () => {
     context.cancelBackupRunOnServer = async () => ({
         success: true, status: 200, runStatus: 'cancelling', runId: 'run-1', serverId: 'server-1', revision: 10
     });
-    vm.runInContext(`beginTrackingRun('run-1'); runStartPending = false; runRequestSent = true; lastServerId = 'server-1';`, context);
+    // 연결된 상태에서 취소하는 시나리오이므로 OPEN socket을 둔다(수렴 폴링 경로가 아님).
+    vm.runInContext(`beginTrackingRun('run-1'); runStartPending = false; runRequestSent = true; lastServerId = 'server-1'; ws = { readyState: 1, close() {} };`, context);
 
     await vm.runInContext('cancelBackup()', context);
     vm.runInContext(`handleProgressUpdate({ type: 'status', run_id: 'run-1', server_id: 'server-1', revision: 9, message: '복사 중' })`, context);
@@ -745,4 +783,646 @@ test('late callbacks from an old WebSocket cannot clear the replacement socket',
     sockets[1].readyState = 1;
     sockets[1].onopen();
     await secondConnect;
+});
+
+test('error terminal with a summary keeps partial results visible', () => {
+    const { context, getElement } = createContext();
+    vm.runInContext(`
+        isRunning = true;
+        runStatus = 'running';
+        currentRunId = 'run-1';
+        runStartPending = false;
+        runRequestSent = true;
+    `, context);
+    // 실제로 처리된 파일 목록을 흉내낸다.
+    getElement('fileList').innerHTML = '<div>[복사] a.jpg</div>';
+
+    vm.runInContext(`handleProgressUpdate({ type: 'error', run_id: 'run-1', error: 'boom', summary: {
+        Duration: 0, BytesCopied: 0, BytesPerSecond: 0, ScannedFiles: 100, TotalFiles: 100,
+        Copied: 99, Skipped: 0, Renamed: 0, Overwritten: 0, Quarantined: 0, Failed: 1, Unclassified: 0
+    } })`, context);
+
+    // summary가 표시되고 처리 목록이 초기화되지 않아야 한다.
+    assert.equal(getElement('summarySection').style.display, 'block');
+    assert.equal(getElement('fileList').innerHTML, '<div>[복사] a.jpg</div>');
+});
+
+test('error terminal without a summary falls back to a reset UI', () => {
+    const { context, getElement } = createContext();
+    vm.runInContext(`
+        isRunning = true;
+        runStatus = 'running';
+        currentRunId = 'run-1';
+        runStartPending = false;
+        runRequestSent = true;
+    `, context);
+    getElement('fileList').innerHTML = '<div>[복사] a.jpg</div>';
+
+    vm.runInContext(`handleProgressUpdate({ type: 'error', run_id: 'run-1', error: 'boom' })`, context);
+
+    // summary가 없으면 기존처럼 목록을 초기화한다.
+    assert.equal(getElement('summarySection').style.display, 'none');
+    assert.notEqual(getElement('fileList').innerHTML, '<div>[복사] a.jpg</div>');
+});
+
+test('409 start response synchronizes to the already-active run', async () => {
+    const { context, getElement } = createContext();
+    context.startBackupRunOnServer = async () => ({ success: false, status: 409, error: '다른 백업이 이미 실행 중입니다.' });
+    context.getBackupRunStatusFromServer = async () => ({
+        success: true,
+        status: 200,
+        runStatus: 'running',
+        runId: 'active-run',
+        revision: 3
+    });
+    vm.runInContext('connectWebSocket = async () => { ws = { readyState: WebSocket.OPEN, close() {} }; };', context);
+    getElement('source').value = '/source';
+    getElement('dest').value = '/dest';
+
+    await vm.runInContext('startBackup()', context);
+
+    assert.equal(vm.runInContext('isRunning', context), true);
+    assert.equal(vm.runInContext('currentRunId', context), 'active-run');
+    assert.equal(getElement('startBtn').disabled, true);
+    assert.equal(getElement('cancelBtn').disabled, false);
+    // WebSocket을 유지해 진행 이벤트를 계속 수신해야 한다.
+    assert.notEqual(vm.runInContext('ws', context), null);
+});
+
+test('progress event from another tab restores the running UI', () => {
+    const { context, getElement } = createContext();
+    // 이 탭은 idle 상태에서 다른 탭이 시작한 실행의 진행 이벤트를 처음 받는다.
+    assert.equal(getElement('startBtn').disabled, false);
+
+    vm.runInContext(`handleProgressUpdate({
+        type: 'analysis_progress', run_id: 'other-tab-run', current: 1, total: 5,
+        message: '메타데이터 분석 중...'
+    })`, context);
+
+    assert.equal(vm.runInContext('isRunning', context), true);
+    assert.equal(vm.runInContext('currentRunId', context), 'other-tab-run');
+    assert.equal(getElement('startBtn').disabled, true);
+    assert.equal(getElement('cancelBtn').disabled, false);
+});
+
+test('start 409 with failed status query keeps a conservative running state', async () => {
+    const { context, getElement } = createContext();
+    context.startBackupRunOnServer = async () => ({ success: false, status: 409, error: 'another run active' });
+    context.getBackupRunStatusFromServer = async () => ({ success: false, error: 'offline' });
+    vm.runInContext('connectWebSocket = async () => { ws = { readyState: WebSocket.OPEN, close() {} }; };', context);
+    getElement('source').value = '/source';
+    getElement('dest').value = '/dest';
+
+    await vm.runInContext('startBackup()', context);
+
+    // 409는 실행 중임을 확정하므로 idle로 되돌리지 않고 WebSocket을 유지한다.
+    assert.equal(vm.runInContext('isRunning', context), true);
+    assert.equal(getElement('startBtn').disabled, true);
+    assert.notEqual(vm.runInContext('ws', context), null);
+});
+
+test('cancel 409 after server restart restores the start button despite epoch reset', async () => {
+    const { context, getElement } = createContext();
+    context.cancelBackupRunOnServer = async () => ({ success: false, status: 409, error: 'mismatch' });
+    // 상태 조회가 새 server epoch(다른 serverId)를 보고하면 currentRunId가 초기화된다.
+    context.getBackupRunStatusFromServer = async () => ({
+        success: true, status: 200, runStatus: 'idle', runId: null, serverId: 'server-2'
+    });
+    vm.runInContext(`lastServerId = 'server-1'; beginTrackingRun('run-1'); runStartPending = false; runRequestSent = true;`, context);
+    getElement('startBtn').disabled = true;
+
+    await vm.runInContext('cancelBackup()', context);
+
+    assert.equal(vm.runInContext('isRunning', context), false);
+    assert.equal(getElement('startBtn').disabled, false);
+});
+
+test('another tab progress restores UI even when start button is disabled by config', async () => {
+    const { context, getElement } = createContext();
+    // 경로 미입력 등으로 시작 버튼이 이미 비활성인 탭에서도 실행 UI가 복구되어야 한다.
+    getElement('startBtn').disabled = true;
+
+    vm.runInContext(`handleProgressUpdate({
+        type: 'analysis_progress', run_id: 'other-tab-run', current: 1, total: 5, message: '메타데이터 분석 중...'
+    })`, context);
+
+    assert.equal(vm.runInContext('isRunning', context), true);
+    assert.equal(getElement('cancelBtn').disabled, false);
+});
+
+test('progress during an in-flight cancel does not reset cancel-pending state', () => {
+    const { context, getElement } = createContext();
+    vm.runInContext(`
+        isRunning = true;
+        currentRunId = 'run-1';
+        runStartPending = false;
+        runRequestSent = true;
+        runCancelPending = true;
+        runCancelRequested = false;
+    `, context);
+    // 취소 HTTP 요청이 진행 중(취소 버튼 비활성)일 때 진행 이벤트가 도착한다.
+    getElement('cancelBtn').disabled = true;
+
+    vm.runInContext(`handleProgressUpdate({ type: 'analysis_progress', run_id: 'run-1', current: 1, total: 5, message: '분석 중' })`, context);
+
+    // restoreRunningUI가 호출되어 runCancelPending을 초기화하거나 취소 버튼을 다시
+    // 활성화하면 안 된다.
+    assert.equal(vm.runInContext('runCancelPending', context), true);
+    assert.equal(getElement('cancelBtn').disabled, true);
+});
+
+test('start 409 that resolves to idle restores the idle UI', async () => {
+    const { context, getElement } = createContext();
+    context.startBackupRunOnServer = async () => ({ success: false, status: 409, error: 'another run active' });
+    // 409를 준 실행이 조회 시점엔 이미 끝나 서버가 idle을 보고한다.
+    context.getBackupRunStatusFromServer = async () => ({ success: true, status: 200, runStatus: 'idle', runId: null });
+    vm.runInContext('connectWebSocket = async () => { ws = { readyState: WebSocket.OPEN, close() {} }; };', context);
+    getElement('source').value = '/source';
+    getElement('dest').value = '/dest';
+
+    await vm.runInContext('startBackup()', context);
+
+    // 불확실한 running 상태로 고정되지 않고 idle UI로 복구되어야 한다.
+    assert.equal(vm.runInContext('isRunning', context), false);
+    assert.equal(getElement('startBtn').disabled, false);
+    assert.equal(getElement('cancelBtn').disabled, true);
+});
+
+test('start 409 with a terminal arriving during status query does not revive the run', async () => {
+    let resolveStatus;
+    const { context, getElement } = createContext();
+    context.startBackupRunOnServer = async () => ({ success: false, status: 409, error: 'another run active' });
+    context.getBackupRunStatusFromServer = () => new Promise((resolve) => { resolveStatus = resolve; });
+    vm.runInContext('connectWebSocket = async () => { ws = { readyState: WebSocket.OPEN, close() {} }; };', context);
+    getElement('source').value = '/source';
+    getElement('dest').value = '/dest';
+
+    const startPromise = vm.runInContext('startBackup()', context);
+    await new Promise((resolve) => setImmediate(resolve));
+    // 상태 조회 대기 중 활성 실행의 complete 이벤트가 도착한다(revision 변화 → stale).
+    vm.runInContext(`handleProgressUpdate({ type: 'complete', run_id: 'active-run', summary: {
+        Duration: 0, BytesCopied: 0, BytesPerSecond: 0, ScannedFiles: 0, TotalFiles: 0,
+        Copied: 0, Skipped: 0, Renamed: 0, Overwritten: 0, Quarantined: 0, Failed: 0, Unclassified: 0
+    } })`, context);
+    // 늦게 도착한 status 응답
+    resolveStatus({ success: true, status: 200, runStatus: 'idle', runId: null });
+    await startPromise;
+
+    // 완료된 실행이 currentRunId·WebSocket 없이 running으로 부활하면 안 된다.
+    assert.equal(vm.runInContext('isRunning', context), false);
+    assert.equal(vm.runInContext('currentRunId', context), null);
+    assert.equal(getElement('startBtn').disabled, false);
+});
+
+test('observed terminal from another tab cleans up this tab tracking run', async () => {
+    const map = new Map();
+    const localStorage = {
+        getItem: (k) => (map.has(k) ? map.get(k) : null),
+        setItem: (k, v) => { map.set(k, String(v)); }
+    };
+    localStorage.setItem('shutterpipe.lastObservedTerminal', 'server-1:run-1');
+    const { context, getElement } = createContext(localStorage);
+    context.getBackupRunStatusFromServer = async () => ({
+        success: true, status: 200, runStatus: 'complete', runId: 'run-1', serverId: 'server-1', revision: 5,
+        summary: { Duration: 0, BytesCopied: 0, BytesPerSecond: 0, ScannedFiles: 0, TotalFiles: 0,
+            Copied: 0, Skipped: 0, Renamed: 0, Overwritten: 0, Quarantined: 0, Failed: 0, Unclassified: 0 }
+    });
+    vm.runInContext(`lastServerId = 'server-1'; beginTrackingRun('run-1'); runStartPending = false; runRequestSent = true;`, context);
+    getElement('startBtn').disabled = true;
+
+    await vm.runInContext('synchronizeRunStatus()', context);
+
+    // 다른 탭이 기록한 terminal을 발견하면 이 탭의 추적 실행/UI도 정리되어야 한다.
+    assert.equal(vm.runInContext('isRunning', context), false);
+    assert.equal(vm.runInContext('currentRunId', context), null);
+    assert.equal(getElement('startBtn').disabled, false);
+});
+
+test('cancel without WebSocket converges to terminal via bounded status polling', async () => {
+    const { context, getElement } = createContext();
+    let statusCallCount = 0;
+    context.cancelBackupRunOnServer = async () => ({ success: true, status: 200, runId: 'run-1' });
+    // 재연결은 실패한다 → bounded backoff 폴링으로 수렴해야 한다.
+    vm.runInContext('connectWebSocket = async () => { throw new Error("no ws"); };', context);
+    context.getBackupRunStatusFromServer = async () => {
+        statusCallCount++;
+        if (statusCallCount === 1) {
+            // 첫 조회 시점엔 아직 취소 진행 중.
+            return { success: true, status: 200, runStatus: 'cancelling', runId: 'run-1' };
+        }
+        // 이후 서버가 취소 완료로 전환.
+        return {
+            success: true, status: 200, runStatus: 'cancelled', runId: 'run-1',
+            message: '백업이 취소되었습니다.',
+            summary: { Duration: 0, BytesCopied: 0, BytesPerSecond: 0, ScannedFiles: 0, TotalFiles: 0,
+                Copied: 0, Skipped: 0, Renamed: 0, Overwritten: 0, Quarantined: 0, Failed: 0, Unclassified: 0 }
+        };
+    };
+    vm.runInContext(`beginTrackingRun('run-1'); runStartPending = false; runRequestSent = true; ws = null;`, context);
+    getElement('startBtn').disabled = true;
+
+    await vm.runInContext('cancelBackup()', context);
+
+    // 단발 조회에 그치지 않고 terminal에 수렴해 UI 잠김이 풀려야 한다.
+    assert.ok(statusCallCount >= 2, `expected >=2 status polls, got ${statusCallCount}`);
+    assert.equal(vm.runInContext('isRunning', context), false);
+    assert.equal(getElement('startBtn').disabled, false);
+    assert.equal(getElement('cancelBtn').disabled, true);
+});
+
+const zeroSummary = { Duration: 0, BytesCopied: 0, BytesPerSecond: 0, ScannedFiles: 0, TotalFiles: 0,
+    Copied: 0, Skipped: 0, Renamed: 0, Overwritten: 0, Quarantined: 0, Failed: 0, Unclassified: 0 };
+
+test('cancel with a failed non-open WebSocket object still converges via polling', async () => {
+    const { context, getElement } = createContext();
+    let statusCallCount = 0;
+    context.cancelBackupRunOnServer = async () => ({ success: true, status: 200, runId: 'run-1' });
+    // connectWebSocket 실패 시 onerror가 reject하지만 ws=null 정리는 이후 onclose에서
+    // 하므로, CLOSED(readyState 3) socket 객체가 남는 실제 lifecycle을 모델링한다.
+    vm.runInContext('connectWebSocket = async () => { ws = { readyState: 3, close() {} }; throw new Error("failed"); };', context);
+    context.getBackupRunStatusFromServer = async () => {
+        statusCallCount++;
+        if (statusCallCount === 1) return { success: true, status: 200, runStatus: 'cancelling', runId: 'run-1' };
+        return { success: true, status: 200, runStatus: 'cancelled', runId: 'run-1', message: 'x', summary: zeroSummary };
+    };
+    vm.runInContext(`beginTrackingRun('run-1'); runStartPending = false; runRequestSent = true; ws = null;`, context);
+    getElement('startBtn').disabled = true;
+
+    await vm.runInContext('cancelBackup()', context);
+
+    // if(ws)로 오판하면 폴링을 건너뛴다. OPEN 여부로 판정해 수렴해야 한다.
+    assert.ok(statusCallCount >= 2, `expected polling, got ${statusCallCount}`);
+    assert.equal(vm.runInContext('isRunning', context), false);
+    assert.equal(getElement('startBtn').disabled, false);
+});
+
+test('WebSocket close during an active-socket cancel starts status convergence', async () => {
+    const { context, getElement } = createContext();
+    let statusCallCount = 0;
+    context.cancelBackupRunOnServer = async () => ({ success: true, status: 200, runId: 'run-1' });
+    context.getBackupRunStatusFromServer = async () => {
+        statusCallCount++;
+        return { success: true, status: 200, runStatus: 'cancelled', runId: 'run-1', message: 'x', summary: zeroSummary };
+    };
+    // 취소 시점엔 WebSocket이 열려 있어 즉시 폴링하지 않는다.
+    vm.runInContext(`beginTrackingRun('run-1'); runStartPending = false; runRequestSent = true; ws = { readyState: 1, close() {} };`, context);
+
+    await vm.runInContext('cancelBackup()', context);
+    assert.equal(statusCallCount, 0, 'live socket이면 폴링하지 않아야 한다');
+
+    // 이후 terminal 전에 연결이 끊긴다(onclose가 ws=null로 정리).
+    vm.runInContext('ws = null;', context);
+    vm.runInContext(`handleWebSocketClose({ code: 1006 }, true, true)`, context);
+    // 백그라운드 수렴 루프가 terminal을 처리해 isRunning이 내려갈 때까지 microtask flush.
+    for (let i = 0; i < 50 && vm.runInContext('isRunning', context); i++) {
+        await new Promise((resolve) => setImmediate(resolve));
+    }
+
+    assert.ok(statusCallCount >= 1, 'close 후 상태 수렴 폴링이 시작되어야 한다');
+    assert.equal(vm.runInContext('isRunning', context), false);
+    assert.equal(getElement('startBtn').disabled, false);
+});
+
+test('durable observer keeps polling past the old bound until terminal', async () => {
+    const { context, getElement } = createContext();
+    let statusCallCount = 0;
+    context.cancelBackupRunOnServer = async () => ({ success: true, status: 200, runId: 'run-1' });
+    vm.runInContext('connectWebSocket = async () => { throw new Error("no ws"); };', context);
+    // 정상 백업/취소가 오래 걸려 예전 6회 bound를 넘어도 관찰자가 포기하지 않아야 한다.
+    // 10회까지 진행 중, 11회째 terminal.
+    context.getBackupRunStatusFromServer = async () => {
+        statusCallCount++;
+        if (statusCallCount <= 10) {
+            return { success: true, status: 200, runStatus: 'cancelling', runId: 'run-1' };
+        }
+        return { success: true, status: 200, runStatus: 'cancelled', runId: 'run-1', message: 'x', summary: zeroSummary };
+    };
+    vm.runInContext(`beginTrackingRun('run-1'); runStartPending = false; runRequestSent = true; ws = null;`, context);
+    getElement('startBtn').disabled = true;
+
+    await vm.runInContext('cancelBackup()', context);
+
+    // 예전 구현이면 6회에서 멈춰 잠겼다. durable observer는 terminal까지 유지한다.
+    assert.ok(statusCallCount >= 11, `expected >=11 polls, got ${statusCallCount}`);
+    assert.equal(vm.runInContext('isRunning', context), false);
+    assert.equal(getElement('startBtn').disabled, false);
+});
+
+test('durable observer recovers after a transient outage instead of giving up', async () => {
+    const { context, getElement } = createContext();
+    let statusCallCount = 0;
+    context.cancelBackupRunOnServer = async () => ({ success: true, status: 200, runId: 'run-1' });
+    vm.runInContext('connectWebSocket = async () => { throw new Error("no ws"); };', context);
+    // 일시적 장애: 7회 조회 실패(예전 5회 give-up을 넘김) → 이후 복구되어 terminal.
+    // 영구 포기하지 않고 저빈도로 계속 재시도해 결국 완료를 관찰해야 한다.
+    context.getBackupRunStatusFromServer = async () => {
+        statusCallCount++;
+        if (statusCallCount <= 7) return { success: false, error: 'network' };
+        if (statusCallCount === 8) return { success: true, status: 200, runStatus: 'cancelling', runId: 'run-1' };
+        return { success: true, status: 200, runStatus: 'cancelled', runId: 'run-1', message: 'x', summary: zeroSummary };
+    };
+    vm.runInContext(`beginTrackingRun('run-1'); runStartPending = false; runRequestSent = true; ws = null;`, context);
+    getElement('startBtn').disabled = true;
+
+    await vm.runInContext('cancelBackup()', context);
+
+    // 예전 구현이면 5회에서 멈춰 잠겼다. 이제는 복구 후 terminal까지 관찰한다.
+    assert.ok(statusCallCount >= 9, `expected recovery past the old 5-failure bound, got ${statusCallCount}`);
+    assert.equal(vm.runInContext('isRunning', context), false);
+    assert.equal(getElement('startBtn').disabled, false);
+});
+
+test('observer reconnect failure does not spawn a competing observer (single lease)', async () => {
+    const { context, getElement } = createContext();
+    let statusCallCount = 0;
+    context.cancelBackupRunOnServer = async () => ({ success: true, status: 200, runId: 'run-1' });
+    // 실제 lifecycle: 재연결 실패 시 onclose가 발생한다. 이를 handleWebSocketClose 호출로
+    // 모델링한다. lease 가드가 없으면 여기서 새 관찰자가 스폰되어 token/backoff가 리셋되고
+    // 관찰자가 폭주한다. 가드가 있으면 기존 관찰자가 유일 소유자로 유지된다.
+    vm.runInContext(`connectWebSocket = async () => {
+        ws = null;
+        handleWebSocketClose({ code: 1006 }, true, true);
+        throw new Error('reconnect failed');
+    };`, context);
+    context.getBackupRunStatusFromServer = async () => {
+        statusCallCount++;
+        if (statusCallCount <= 2) return { success: true, status: 200, runStatus: 'cancelling', runId: 'run-1' };
+        return { success: true, status: 200, runStatus: 'cancelled', runId: 'run-1', message: 'x', summary: zeroSummary };
+    };
+    vm.runInContext(`beginTrackingRun('run-1'); runStartPending = false; runRequestSent = true; ws = null;`, context);
+    getElement('startBtn').disabled = true;
+
+    await vm.runInContext('cancelBackup()', context);
+
+    // 관찰자는 정확히 한 번만 시작되어야 한다(token 0→1). 폭주하면 token이 커진다.
+    assert.equal(vm.runInContext('statusConvergenceToken', context), 1, 'single observer lease여야 한다');
+    assert.equal(vm.runInContext('runningObserverToken', context), null, 'terminal 후 lease가 해제되어야 한다');
+    assert.equal(vm.runInContext('isRunning', context), false);
+    assert.equal(getElement('startBtn').disabled, false);
+});
+
+test('cancel response loss does not lock out re-cancel when the run is still running', async () => {
+    const { context, getElement } = createContext();
+    // status 없는 네트워크 실패 + WebSocket은 살아 있음. POST가 도달하지 못해 서버가
+    // 계속 running일 수 있으므로 취소를 확정하면 안 되고 재취소가 가능해야 한다(P1-a).
+    let cancelAttempts = 0;
+    context.cancelBackupRunOnServer = async () => {
+        cancelAttempts++;
+        if (cancelAttempts === 1) return { success: false, error: 'network' };
+        return { success: true, status: 200, runId: 'run-1', runStatus: 'cancelling' };
+    };
+    vm.runInContext(`beginTrackingRun('run-1'); runStartPending = false; runRequestSent = true; ws = { readyState: 1, close() {} };`, context);
+
+    await vm.runInContext('cancelBackup()', context);
+
+    // 낙관적 확정 금지: 의도는 확정되지 않고 취소 버튼은 다시 열려 있어야 한다.
+    assert.equal(vm.runInContext('runCancelRequested', context), false, '취소를 확정하면 안 된다');
+    assert.equal(vm.runInContext('runCancelPending', context), false);
+    assert.equal(getElement('cancelBtn').disabled, false, '재취소가 가능해야 한다');
+    assert.equal(vm.runInContext('isRunning', context), true);
+
+    // 재취소는 이번엔 성공한다 → 취소 확정.
+    await vm.runInContext('cancelBackup()', context);
+    assert.equal(vm.runInContext('runCancelRequested', context), true, '재취소가 취소를 확정해야 한다');
+});
+
+test('cancel convergence hands off observation to a newly adopted active run', async () => {
+    const { context, getElement } = createContext();
+    context.cancelBackupRunOnServer = async () => ({ success: true, status: 200, runId: 'run-1' });
+    vm.runInContext('connectWebSocket = async () => { throw new Error("no ws"); };', context);
+    // 폴링 1~2회: run-2가 활성(scoped mismatch → unscoped 채택). 3회부터: run-2 완료.
+    // 채택 후 소켓이 없으면 run-2의 terminal을 받을 경로가 없어 시작 버튼이 잠기던 P1.
+    let statusCallCount = 0;
+    context.getBackupRunStatusFromServer = async () => {
+        statusCallCount++;
+        if (statusCallCount <= 2) {
+            return { success: true, status: 200, runStatus: 'running', runId: 'run-2' };
+        }
+        return { success: true, status: 200, runStatus: 'complete', runId: 'run-2', message: 'x', summary: zeroSummary };
+    };
+    vm.runInContext(`beginTrackingRun('run-1'); runStartPending = false; runRequestSent = true; ws = null;`, context);
+    getElement('startBtn').disabled = true;
+
+    await vm.runInContext('cancelBackup()', context);
+    // run-2 수렴은 fire-and-forget이므로 terminal까지 microtask flush.
+    for (let i = 0; i < 50 && vm.runInContext('isRunning', context); i++) {
+        await new Promise((resolve) => setImmediate(resolve));
+    }
+
+    // run-2가 완료로 수렴해 실행 상태가 정리되고 시작 버튼이 열려야 한다.
+    assert.equal(vm.runInContext('isRunning', context), false);
+    assert.equal(vm.runInContext('terminalRunId', context), 'run-2');
+    assert.equal(getElement('startBtn').disabled, false);
+});
+
+test('WebSocket close while a cancel request is pending does not reopen the cancel button', async () => {
+    const { context, getElement } = createContext();
+    let resolveCancel;
+    const cancelPromise = new Promise((resolve) => { resolveCancel = resolve; });
+    context.cancelBackupRunOnServer = () => cancelPromise;
+    vm.runInContext('connectWebSocket = async () => { throw new Error("no ws"); };', context);
+    let statusCallCount = 0;
+    context.getBackupRunStatusFromServer = async () => {
+        statusCallCount++;
+        return { success: true, status: 200, runStatus: 'cancelled', runId: 'run-1', message: 'x', summary: zeroSummary };
+    };
+    vm.runInContext(`beginTrackingRun('run-1'); runStartPending = false; runRequestSent = true; ws = { readyState: 1, close() {} };`, context);
+
+    // 취소 요청 시작(응답이 오기 전까지 runCancelPending 유지).
+    const cancelDone = vm.runInContext('cancelBackup()', context);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(vm.runInContext('runCancelPending', context), true);
+
+    // 응답 전에 WebSocket close. pending 중 close는 수렴을 시작하면 안 된다.
+    vm.runInContext('ws = null;', context);
+    vm.runInContext(`handleWebSocketClose({ code: 1006 }, true, true)`, context);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(statusCallCount, 0, 'pending 중 close는 폴링을 시작하지 않아야 한다');
+    assert.equal(vm.runInContext('runCancelPending', context), true, '취소 pending이 유지되어야 한다');
+    assert.equal(getElement('cancelBtn').disabled, true, '취소 버튼이 다시 열려서는 안 된다');
+
+    // 응답 도착 → 요청 자신이 수렴을 담당해 terminal까지 처리.
+    resolveCancel({ success: true, status: 200, runId: 'run-1' });
+    await cancelDone;
+    for (let i = 0; i < 50 && vm.runInContext('isRunning', context); i++) {
+        await new Promise((resolve) => setImmediate(resolve));
+    }
+    assert.ok(statusCallCount >= 1, '요청 settle 후 수렴 폴링이 시작되어야 한다');
+    assert.equal(vm.runInContext('isRunning', context), false);
+});
+
+test('cancel response loss keeps cancel intent and observes to terminal', async () => {
+    const { context, getElement } = createContext();
+    // status 없는 네트워크 실패: POST가 서버에 도달해 취소가 시작됐을 수 있다.
+    context.cancelBackupRunOnServer = async () => ({ success: false, error: 'network' });
+    vm.runInContext('connectWebSocket = async () => { throw new Error("no ws"); };', context);
+    let statusCallCount = 0;
+    context.getBackupRunStatusFromServer = async () => {
+        statusCallCount++;
+        if (statusCallCount === 1) return { success: true, status: 200, runStatus: 'cancelling', runId: 'run-1' };
+        return { success: true, status: 200, runStatus: 'cancelled', runId: 'run-1', message: 'x', summary: zeroSummary };
+    };
+    vm.runInContext(`beginTrackingRun('run-1'); runStartPending = false; runRequestSent = true; ws = null;`, context);
+    getElement('startBtn').disabled = true;
+
+    await vm.runInContext('cancelBackup()', context);
+
+    // 확정 실패로 보고 의도를 버리는 대신, cancelling으로 확정하고 terminal까지 관찰.
+    assert.ok(statusCallCount >= 2, `expected observation polling, got ${statusCallCount}`);
+    assert.equal(vm.runInContext('isRunning', context), false);
+    assert.equal(getElement('startBtn').disabled, false);
+});
+
+test('restoreRunningUI preserves an active cancel intent on a running snapshot', () => {
+    const { context, getElement } = createContext();
+    // 취소가 확정된 상태에서 서버가 아직 running을 보고해도 취소 의도를 보존해야 한다.
+    vm.runInContext(`beginTrackingRun('run-1'); runCancelRequested = true; runCancelPending = false;`, context);
+    getElement('cancelBtn').disabled = false;
+
+    vm.runInContext(`restoreRunningUI('running')`, context);
+
+    assert.equal(vm.runInContext('runCancelRequested', context), true, '취소 의도가 유지되어야 한다');
+    assert.equal(vm.runInContext('runCancelPending', context), false);
+    assert.equal(getElement('cancelBtn').disabled, true, '취소 버튼이 다시 열려서는 안 된다');
+    assert.equal(getElement('progressText').textContent, '취소 요청 중...');
+});
+
+test('observer receiving a running snapshot mid-cancel does not reopen the cancel button', async () => {
+    const { context, getElement } = createContext();
+    context.cancelBackupRunOnServer = async () => ({ success: true, status: 200, runId: 'run-1' });
+    vm.runInContext('connectWebSocket = async () => { throw new Error("no ws"); };', context);
+    let statusCallCount = 0;
+    // 취소 확정 후에도 서버는 아직 running(취소 처리 중 파일 복사 진행) → cancelled.
+    context.getBackupRunStatusFromServer = async () => {
+        statusCallCount++;
+        if (statusCallCount <= 2) return { success: true, status: 200, runStatus: 'running', runId: 'run-1' };
+        return { success: true, status: 200, runStatus: 'cancelled', runId: 'run-1', message: 'x', summary: zeroSummary };
+    };
+    vm.runInContext(`beginTrackingRun('run-1'); runStartPending = false; runRequestSent = true; ws = null;`, context);
+    getElement('startBtn').disabled = true;
+
+    await vm.runInContext('cancelBackup()', context);
+
+    // running snapshot이 restoreRunningUI를 거쳐도 취소 의도가 유지되고, 결국 terminal.
+    assert.ok(statusCallCount >= 3, `expected observation polling, got ${statusCallCount}`);
+    assert.equal(vm.runInContext('isRunning', context), false);
+    assert.equal(getElement('startBtn').disabled, false);
+});
+
+test('initial WebSocket failure adopts the active run over HTTP and converges to terminal', async () => {
+    const { context, getElement } = createContext();
+    // 페이지 로드 시 WebSocket 연결 실패 → HTTP로 active run 채택 → 관찰자가 terminal까지.
+    vm.runInContext('connectWebSocket = async () => { throw new Error("no ws"); };', context);
+    let statusCallCount = 0;
+    context.getBackupRunStatusFromServer = async () => {
+        statusCallCount++;
+        if (statusCallCount <= 2) return { success: true, status: 200, runStatus: 'running', runId: 'run-A' };
+        return { success: true, status: 200, runStatus: 'complete', runId: 'run-A', message: 'x', summary: zeroSummary };
+    };
+    getElement('startBtn').disabled = false;
+
+    await vm.runInContext('initializeRunTracking()', context);
+    for (let i = 0; i < 50 && vm.runInContext('isRunning', context); i++) {
+        await new Promise((resolve) => setImmediate(resolve));
+    }
+
+    assert.equal(vm.runInContext('isRunning', context), false);
+    assert.equal(vm.runInContext('terminalRunId', context), 'run-A');
+    assert.equal(getElement('startBtn').disabled, false);
+});
+
+test('WebSocket close during a normal run converges to terminal', async () => {
+    const { context, getElement } = createContext();
+    vm.runInContext('connectWebSocket = async () => { throw new Error("no ws"); };', context);
+    let statusCallCount = 0;
+    context.getBackupRunStatusFromServer = async () => {
+        statusCallCount++;
+        if (statusCallCount <= 2) return { success: true, status: 200, runStatus: 'running', runId: 'run-1' };
+        return { success: true, status: 200, runStatus: 'complete', runId: 'run-1', message: 'x', summary: zeroSummary };
+    };
+    vm.runInContext(`beginTrackingRun('run-1'); runStartPending = false; runRequestSent = true; ws = null;`, context);
+    getElement('startBtn').disabled = true;
+
+    // 취소가 아닌 정상 실행 중 연결 종료 → 관찰자가 terminal까지 폴링해야 한다.
+    vm.runInContext(`handleWebSocketClose({ code: 1006 }, true, false)`, context);
+    for (let i = 0; i < 50 && vm.runInContext('isRunning', context); i++) {
+        await new Promise((resolve) => setImmediate(resolve));
+    }
+
+    assert.ok(statusCallCount >= 1, '연결 종료 후 상태 폴링이 시작되어야 한다');
+    assert.equal(vm.runInContext('isRunning', context), false);
+    assert.equal(getElement('startBtn').disabled, false);
+});
+
+test('cancel 409 adopts a successor run without WebSocket and converges to terminal', async () => {
+    const { context, getElement } = createContext();
+    context.cancelBackupRunOnServer = async () => ({ success: false, status: 409, error: 'conflict' });
+    vm.runInContext('connectWebSocket = async () => { throw new Error("no ws"); };', context);
+    let statusCallCount = 0;
+    context.getBackupRunStatusFromServer = async () => {
+        statusCallCount++;
+        if (statusCallCount <= 3) return { success: true, status: 200, runStatus: 'running', runId: 'run-2' };
+        return { success: true, status: 200, runStatus: 'complete', runId: 'run-2', message: 'x', summary: zeroSummary };
+    };
+    vm.runInContext(`beginTrackingRun('run-1'); runStartPending = false; runRequestSent = true; ws = null;`, context);
+    getElement('startBtn').disabled = true;
+
+    await vm.runInContext('cancelBackup()', context);
+    for (let i = 0; i < 50 && vm.runInContext('isRunning', context); i++) {
+        await new Promise((resolve) => setImmediate(resolve));
+    }
+
+    // successor run-2를 채택하고, 소켓이 없어도 관찰자가 terminal까지 유지해야 한다.
+    assert.equal(vm.runInContext('terminalRunId', context), 'run-2');
+    assert.equal(vm.runInContext('isRunning', context), false);
+    assert.equal(getElement('startBtn').disabled, false);
+});
+
+test('uncertain start with an open WebSocket converges when the server is idle', async () => {
+    const { context, getElement } = createContext();
+    // WebSocket은 열려 있지만 시작 POST가 서버에 도달하지 못한 경우: 서버는 idle이라
+    // WebSocket 이벤트가 오지 않는다. HTTP 수렴으로 idle을 확정해 UI를 풀어야 한다(P1).
+    vm.runInContext('connectWebSocket = async () => { ws = { readyState: WebSocket.OPEN, close() {} }; };', context);
+    context.startBackupRunOnServer = async () => ({ success: false, error: 'network' }); // status 없음
+    let statusCallCount = 0;
+    context.getBackupRunStatusFromServer = async () => {
+        statusCallCount++;
+        if (statusCallCount === 1) return { success: false, error: 'network' }; // 최초 조회 실패 → synthetic
+        return { success: true, status: 200, runStatus: 'idle', runId: null }; // POST 미도달 → 서버 idle
+    };
+    getElement('source').value = '/s';
+    getElement('dest').value = '/d';
+
+    await vm.runInContext('startBackup()', context);
+    for (let i = 0; i < 50 && vm.runInContext('isRunning', context); i++) {
+        await new Promise((resolve) => setImmediate(resolve));
+    }
+
+    assert.ok(statusCallCount >= 2, `expected HTTP convergence, got ${statusCallCount}`);
+    assert.equal(vm.runInContext('isRunning', context), false);
+    assert.equal(getElement('startBtn').disabled, false);
+});
+
+test('observed terminal with no tracked run restores the start button (409 + cross-tab terminal)', async () => {
+    const map = new Map();
+    const localStorage = {
+        getItem: (k) => (map.has(k) ? map.get(k) : null),
+        setItem: (k, v) => { map.set(k, String(v)); }
+    };
+    localStorage.setItem('shutterpipe.lastObservedTerminal', 'server-1:run-A');
+    const { context, getElement } = createContext(localStorage);
+    context.getBackupRunStatusFromServer = async () => ({
+        success: true, status: 200, runStatus: 'complete', runId: 'run-A', serverId: 'server-1', revision: 5,
+        summary: zeroSummary
+    });
+    // 409가 requested run을 정리한 직후 상태: 추적 run 없음(currentRunId=null), 시작 버튼 잠김.
+    vm.runInContext(`lastServerId = 'server-1'; currentRunId = null; isRunning = false; runStartPending = false;`, context);
+    getElement('startBtn').disabled = true;
+
+    await vm.runInContext('synchronizeRunStatus(null, { observe: true })', context);
+
+    // 다른 탭이 이미 기록한 terminal이라도 추적 run이 없으면 idle UI를 복원해야 한다.
+    assert.equal(getElement('startBtn').disabled, false);
+    assert.equal(vm.runInContext('currentRunId', context), null);
 });

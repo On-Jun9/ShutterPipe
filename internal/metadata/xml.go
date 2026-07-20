@@ -84,6 +84,26 @@ func extractXMLFileWithContext(ctx context.Context, path, source string) types.M
 	}
 }
 
+// SidecarIdentity returns the identity of the XML sidecar that supplies the
+// capture time for a video entry, if one is present. The sidecar can appear or
+// change after an earlier run, moving the file to a different destination, so
+// callers fold this identity into their reprocessing decision. It only stats the
+// candidate sidecar path, so it stays cheap on the state fast path.
+func SidecarIdentity(entry types.FileEntry) (size, modTimeUnixNano int64, ok bool) {
+	if !entry.IsVideo {
+		return 0, 0, false
+	}
+	xmlPath := (&XMLExtractor{}).findXMLPath(entry.Path)
+	if xmlPath == "" {
+		return 0, 0, false
+	}
+	info, err := os.Stat(xmlPath)
+	if err != nil {
+		return 0, 0, false
+	}
+	return info.Size(), info.ModTime().UnixNano(), true
+}
+
 func (e *XMLExtractor) findXMLPath(videoPath string) string {
 	dir := filepath.Dir(videoPath)
 	basename := strings.TrimSuffix(filepath.Base(videoPath), filepath.Ext(videoPath))

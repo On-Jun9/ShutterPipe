@@ -41,6 +41,7 @@ func New(workers int, dryRun, hashVerify bool) *Copier {
 type CopyResult struct {
 	Task               types.CopyTask
 	VerifiedSourceHash []byte
+	Warning            string
 	Error              error
 }
 
@@ -136,7 +137,7 @@ func (c *Copier) copyOne(ctx context.Context, task types.CopyTask) CopyResult {
 	}
 	partPath := partFile.Name()
 
-	sourceHash, err := c.copyToPart(ctx, task.Source, partFile)
+	sourceHash, warning, err := c.copyToPart(ctx, task.Source, partFile)
 	if err != nil {
 		if cleanupErr := os.Remove(partPath); cleanupErr != nil && !errors.Is(cleanupErr, os.ErrNotExist) {
 			err = errors.Join(err, cleanupErr)
@@ -187,10 +188,10 @@ func (c *Copier) copyOne(ctx context.Context, task types.CopyTask) CopyResult {
 	}
 	if skipped {
 		task.Status = types.TaskStatusSkipped
-		return CopyResult{Task: task}
+		return CopyResult{Task: task, Warning: warning}
 	}
 	task.Status = types.TaskStatusCompleted
-	return CopyResult{Task: task, VerifiedSourceHash: append([]byte(nil), sourceHash...)}
+	return CopyResult{Task: task, VerifiedSourceHash: append([]byte(nil), sourceHash...), Warning: warning}
 }
 
 func newPartFile(finalDest string) (*os.File, error) {
@@ -213,21 +214,21 @@ func newPartFile(finalDest string) (*os.File, error) {
 	return nil, fmt.Errorf("failed to allocate temporary file for %s", finalDest)
 }
 
-func (c *Copier) copyToPart(ctx context.Context, source types.FileEntry, dstFile *os.File) ([]byte, error) {
+func (c *Copier) copyToPart(ctx context.Context, source types.FileEntry, dstFile *os.File) ([]byte, string, error) {
 	srcFile, err := os.Open(source.Path)
 	if err != nil {
 		dstFile.Close()
-		return nil, err
+		return nil, "", err
 	}
 	defer srcFile.Close()
 	before, err := srcFile.Stat()
 	if err != nil {
 		dstFile.Close()
-		return nil, err
+		return nil, "", err
 	}
 	if before.Size() != source.Size || (!source.ModTime.IsZero() && !before.ModTime().Equal(source.ModTime)) {
 		dstFile.Close()
-		return nil, fmt.Errorf("source changed since scan: %s", source.Path)
+		return nil, "", fmt.Errorf("source changed since scan: %s", source.Path)
 	}
 	partDest := dstFile.Name()
 	hasher := sha256.New()
@@ -236,7 +237,7 @@ func (c *Copier) copyToPart(ctx context.Context, source types.FileEntry, dstFile
 	for {
 		if err := ctx.Err(); err != nil {
 			dstFile.Close()
-			return nil, err
+			return nil, "", err
 		}
 
 		n, readErr := srcFile.Read(buf)
@@ -244,16 +245,16 @@ func (c *Copier) copyToPart(ctx context.Context, source types.FileEntry, dstFile
 			written, err := dstFile.Write(buf[:n])
 			if err != nil {
 				dstFile.Close()
-				return nil, err
+				return nil, "", err
 			}
 			if written != n {
 				dstFile.Close()
-				return nil, io.ErrShortWrite
+				return nil, "", io.ErrShortWrite
 			}
 			if c.hashVerify {
 				if _, err := hasher.Write(buf[:n]); err != nil {
 					dstFile.Close()
-					return nil, err
+					return nil, "", err
 				}
 			}
 		}
@@ -263,34 +264,53 @@ func (c *Copier) copyToPart(ctx context.Context, source types.FileEntry, dstFile
 		}
 		if readErr != nil {
 			dstFile.Close()
-			return nil, readErr
+			return nil, "", readErr
 		}
 	}
 	after, err := srcFile.Stat()
 	if err != nil {
 		dstFile.Close()
-		return nil, err
+		return nil, "", err
 	}
 	if !os.SameFile(before, after) || before.Size() != after.Size() || !before.ModTime().Equal(after.ModTime()) {
 		dstFile.Close()
-		return nil, fmt.Errorf("source changed during copy: %s", source.Path)
+		return nil, "", fmt.Errorf("source changed during copy: %s", source.Path)
 	}
 
 	if err := dstFile.Close(); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
-	// Preserve modification time
-	os.Chtimes(partDest, before.ModTime(), before.ModTime())
+	// Preserve modification time. The bytes are already safely staged, so a
+	// failure here (e.g. a NAS that rejects timestamp updates) is surfaced as a
+	// warning rather than failing the copy — but it must not be reported as a
+	// clean success.
+	var warning string
+	if err := os.Chtimes(partDest, before.ModTime(), before.ModTime()); err != nil {
+		warning = fmt.Sprintf("수정 시각을 보존하지 못했습니다 %s: %v", source.Path, err)
+	}
 
 	if !c.hashVerify {
-		return nil, nil
+		return nil, warning, nil
 	}
-	return hasher.Sum(nil), nil
+	return hasher.Sum(nil), warning, nil
 }
 
 func commitTask(partPath string, task *types.CopyTask) (bool, error) {
-	if task.Action == types.CopyActionOverwritten {
+	// Overwrite policy publishes with a plain replace whether or not the
+	// destination already exists. Its clobbering semantics are intended, and this
+	// is the only publish path that works on filesystems without an atomic
+	// no-replace primitive (exFAT/FAT) — which is why it is the documented
+	// fallback there. The scan-order-serialized single worker keeps it race-free.
+	// Upgrade the action to Overwritten when the destination exists at commit
+	// time (it may have appeared after planning) so run summary counters stay
+	// correct; the replace itself is safe either way.
+	if task.ConflictPolicy == types.ConflictPolicyOverwrite {
+		if _, statErr := os.Stat(task.DestPath); statErr == nil {
+			task.Action = types.CopyActionOverwritten
+		} else if !os.IsNotExist(statErr) {
+			return false, statErr
+		}
 		return false, replaceFile(partPath, task.DestPath)
 	}
 
@@ -300,6 +320,8 @@ func commitTask(partPath string, task *types.CopyTask) (bool, error) {
 		return false, err
 	}
 
+	// Overwrite is handled above before the no-replace attempt, so it never
+	// reaches this conflict switch.
 	switch task.ConflictPolicy {
 	case types.ConflictPolicySkip:
 		if err := os.Remove(partPath); err != nil {
@@ -307,13 +329,6 @@ func commitTask(partPath string, task *types.CopyTask) (bool, error) {
 		}
 		task.Action = types.CopyActionSkipped
 		return true, nil
-
-	case types.ConflictPolicyOverwrite:
-		if err := replaceFile(partPath, task.DestPath); err != nil {
-			return false, err
-		}
-		task.Action = types.CopyActionOverwritten
-		return false, nil
 
 	case types.ConflictPolicyRename:
 		task.Action = types.CopyActionRenamed
@@ -446,6 +461,10 @@ func movePartNoReplace(partPath, finalDest string) error {
 	} else if errors.Is(linkErr, os.ErrExist) {
 		return linkErr
 	} else {
+		// exFAT/FAT and some SMB shares support neither an exclusive rename nor
+		// hard links. There is no primitive that provides both no-clobber and a
+		// crash-safe atomic publish on such filesystems, so fail safely rather
+		// than risk clobbering an existing file or leaving a truncated one.
 		return fmt.Errorf("destination filesystem does not support atomic no-replace commit: %w", linkErr)
 	}
 }

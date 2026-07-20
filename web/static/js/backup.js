@@ -4,6 +4,25 @@
 const observedTerminalRuns = new Set();
 const terminalObservationStorageKey = 'shutterpipe.lastObservedTerminal';
 
+// 상태 수렴 루프 식별자. 새 루프가 시작되면 증가시켜 이전 루프가 스스로 종료하게
+// 하여 중복 실행을 방지한다.
+let statusConvergenceToken = 0;
+// 현재 실행 중인 관찰자(observeRunUntilTerminal)의 token. null이면 관찰자가 없다.
+// 관찰자가 스스로 시도하는 WebSocket 재연결이 실패해 onclose가 발생해도, 이 값으로
+// 이미 관찰자가 있음을 알 수 있어 handleWebSocketClose가 중복 관찰자를 스폰하지
+// 않는다(run별 단일 소유권 lease). 관찰자는 종료 시 자신이 여전히 소유자일 때만 해제한다.
+let runningObserverToken = null;
+// capped backoff 지연(ms). 상한(마지막 값)에 도달하면 그 간격으로 저빈도 유지한다.
+const statusConvergenceDelaysMs = [500, 1000, 2000, 4000, 8000];
+
+// isSocketOpen은 ws가 실제로 열려 있는지 판정한다. connectWebSocket은 연결 전에
+// ws에 socket을 대입하고 실패 시 onerror에서 reject하지만 ws=null 정리는 이후
+// onclose에서 하므로, 단순 `if (ws)`는 CONNECTING/CLOSING/CLOSED socket을 연결됨으로
+// 오판한다. terminal 이벤트를 받을 수 있는 상태는 OPEN뿐이다.
+function isSocketOpen() {
+    return !!ws && ws.readyState === WebSocket.OPEN;
+}
+
 function terminalObservationKey(serverId, runId) {
     return `${serverId || 'unknown'}:${runId || ''}`;
 }
@@ -141,22 +160,144 @@ function acceptProgressUpdate(update) {
 function restoreRunningUI(status) {
     runStartPending = false;
     runRequestSent = true;
-    runCancelPending = false;
-    runCancelRequested = status === 'cancelling';
+    // 취소가 진행/확정 중이면 서버가 아직 running을 보고해도 취소 의도를 보존한다.
+    // durable observer가 취소 처리 중 받은 running snapshot으로 취소 상태를 되돌리거나
+    // (P1-c), 취소 pending을 해제해 버튼을 다시 열지 않도록 한다.
+    const cancelActive = runCancelPending || runCancelRequested;
+    if (!cancelActive) {
+        runCancelPending = false;
+        runCancelRequested = status === 'cancelling';
+    }
+    const showCancelling = cancelActive || status === 'cancelling';
     document.getElementById('startBtn').disabled = true;
-    setCancelButtonState(status === 'running');
+    setCancelButtonState(showCancelling ? false : status === 'running');
 
     const progressSection = document.getElementById('progressSection');
     if (progressSection) progressSection.style.display = 'block';
     const progressText = document.getElementById('progressText');
     if (progressText) {
-        progressText.textContent = status === 'cancelling'
+        progressText.textContent = showCancelling
             ? '취소 요청 중...'
             : '실행 중인 백업에 다시 연결되었습니다.';
     }
 }
 
-async function synchronizeRunStatus(expectedRunId = null) {
+function finishStaleTrackedRun(runId) {
+    // 추적하던 run이 사라졌다(다른 run 활성/idle/epoch 변경). 우리 run을 정리하고
+    // 버튼을 복구한 뒤, 새 active run이 있으면 채택하도록 unscoped sync를 시도한다.
+    // finishTrackedRun이 false면 이미 다른 successor run이 채택된 것이므로, 그 run의
+    // UI를 깨지 않도록 버튼 복구를 건너뛴다.
+    if (finishTrackedRun(runId, false)) {
+        setCancelButtonState(false);
+        if (typeof enableBackupButton === 'function') {
+            enableBackupButton();
+        } else {
+            document.getElementById('startBtn').disabled = false;
+        }
+    }
+    // 새 active run을 채택하면 관찰자를 보장한다(관찰자 mismatch 경로에서 호출된 경우엔
+    // lease를 이미 보유해 no-op이고, handoff는 별도로 소유권을 넘긴다).
+    return synchronizeRunStatus(null, { observe: true });
+}
+
+// observeRunUntilTerminal은 지정한 run을 terminal까지 소유하는 run별 단일 관찰자다.
+// runningObserverToken으로 lease를 표시해, 관찰자가 스스로 시도하는 WebSocket
+// 재연결이 실패해 onclose가 나더라도 중복 관찰자가 스폰되지 않는다(단일 소유권).
+// 관찰의 기본 경로는 WebSocket이므로 매 회차 재연결을 시도하고, 성공하면 이후
+// terminal은 live 이벤트가 전달하도록 소유권을 놓고 종료한다. WebSocket이 없으면
+// capped backoff로 status를 폴링하되, 상한(마지막 지연=8s)에 도달하면 그 간격으로
+// 저빈도 무기한 유지한다 — 정상 백업은 오래 걸릴 수 있고 일시적 장애도 지나갈 수
+// 있으므로 고정 횟수에서 영구 포기하지 않는다. 종료 조건:
+//   - terminal 도달(handler가 UI 정리)
+//   - mismatch/idle/epoch 변경 → 정리 후 새 active run이 있으면 그 run으로 소유권 이관
+//   - WebSocket 재연결(이후 terminal은 WebSocket이 전달)
+//   - 새 관찰자가 lease를 인수(token 교체)
+async function observeRunUntilTerminal(runId, options) {
+    const myToken = ++statusConvergenceToken;
+    runningObserverToken = myToken;
+    // assumeActive=false는 "불확실 시작"이다: 실행이 실제로 존재하는지 아직 모르므로
+    // WebSocket이 열려 있어도(서버가 idle이면 이벤트가 안 온다) active/terminal/idle/
+    // mismatch가 확정될 때까지 HTTP로 계속 수렴한다. active를 확인하면 confirmed가 되어
+    // 이후 WebSocket이 살아 있으면 live 이벤트에 소유권을 넘긴다.
+    let confirmed = !options || options.assumeActive !== false;
+    let degraded = false;
+    try {
+        for (let attempt = 0; ; attempt++) {
+            if (attempt > 0) {
+                const delayIndex = Math.min(attempt - 1, statusConvergenceDelaysMs.length - 1);
+                await new Promise((resolve) => setTimeout(resolve, statusConvergenceDelaysMs[delayIndex]));
+            }
+            if (statusConvergenceToken !== myToken) return; // 새 관찰자가 lease 인수
+            if (!isRunning || currentRunId !== runId || terminalRunId === runId) return;
+
+            // 관찰의 기본 경로는 WebSocket이다. 끊겼으면 재연결을 시도한다. 이 재연결
+            // 실패로 onclose가 발생해도 runningObserverToken이 이 관찰자를 가리켜
+            // handleWebSocketClose가 새 관찰자를 스폰하지 않는다.
+            if (!isSocketOpen()) {
+                try {
+                    await connectWebSocket();
+                } catch (_error) {
+                    // 재연결 실패 시에는 이번 회차를 폴링으로 확인한다.
+                }
+                if (statusConvergenceToken !== myToken) return;
+            }
+
+            // WebSocket 재연결 여부와 무관하게 catch-up 조회를 1회 한다: 연결이 끊긴
+            // 동안 terminal에 도달했다면 재연결된 WebSocket은 그 이벤트를 재생하지 않는다.
+            const reconciliation = await synchronizeRunStatus(runId);
+            if (statusConvergenceToken !== myToken) return;
+            if (reconciliation?.terminal) return; // terminal 핸들러가 UI를 이미 정리함
+            if (reconciliation?.mismatch || reconciliation?.idle || currentRunId !== runId || terminalRunId === runId) {
+                const adopted = await finishStaleTrackedRun(runId);
+                // unscoped sync가 소켓 없이 새 active run을 채택했다면 그 run으로 관찰
+                // 소유권을 넘겨 terminal까지 유지한다(handoff가 token을 올려 lease 이관).
+                if (adopted?.active && !isSocketOpen() && currentRunId && currentRunId !== runId) {
+                    observeRunUntilTerminal(currentRunId);
+                }
+                return;
+            }
+
+            // active(running/cancelling)를 실제로 관측하면 실행 존재가 확정된다.
+            if (reconciliation?.active) confirmed = true;
+
+            // 조회 실패(서버 도달 불가)여도 영구 종료하지 않는다. capped backoff 상한에서
+            // 저빈도로 계속 재시도해 서버 복구/실행 terminal을 관찰한다. 상태 전이 시에만
+            // 안내를 남긴다(스팸 방지).
+            const queryFailed = reconciliation && reconciliation.resolved === false && !reconciliation.stale;
+            if (queryFailed && !degraded) {
+                degraded = true;
+                addLogEntry('연결이 불안정합니다. 백업 상태를 계속 확인합니다.', 'warning');
+            } else if (!queryFailed && degraded) {
+                degraded = false;
+                addLogEntry('상태 조회가 다시 정상화되었습니다.', 'info');
+            }
+
+            // 실행이 확정된 상태에서 WebSocket이 살아 있으면 이후 terminal은 live 이벤트가
+            // 전달하므로 폴링을 멈추고 lease를 놓는다. 아직 불확실(confirmed=false)하면
+            // WebSocket이 열려 있어도 확정될 때까지 계속 폴링한다.
+            if (isSocketOpen() && confirmed) return;
+        }
+    } finally {
+        // 이 관찰자가 여전히 소유자일 때만 lease를 해제한다. successor로 소유권을 넘긴
+        // 경우(handoff가 token 증가) lease는 successor가 계속 보유한다.
+        if (statusConvergenceToken === myToken) runningObserverToken = null;
+    }
+}
+
+// ensureObserver는 active 채택/소켓 상실/불확실 시작 등 모든 진입 경로가 공유하는
+// 단일 관찰자 보장 지점이다. 이미 관찰자가 있으면(lease 보유) 아무것도 하지 않아
+// 중복 관찰자를 만들지 않는다. confirmed-active(assumeActive=true, 기본)는 WebSocket이
+// 살아 있으면 live 이벤트가 terminal을 전달하므로 관찰자를 띄우지 않는다. 불확실
+// 시작(assumeActive=false)은 WebSocket 상태와 무관하게 HTTP로 확정까지 수렴한다.
+function ensureObserver(runId, options) {
+    if (!runId) return;
+    if (runningObserverToken !== null) return; // 이미 관찰자가 소유 중
+    const assumeActive = !options || options.assumeActive !== false;
+    if (assumeActive && isSocketOpen()) return; // live WebSocket이 terminal 전달
+    observeRunUntilTerminal(runId, { assumeActive });
+}
+
+async function synchronizeRunStatus(expectedRunId = null, options = {}) {
     const requestedRevision = runStateRevision;
     const result = await getBackupRunStatusFromServer();
     if (!result.success) {
@@ -187,6 +328,19 @@ async function synchronizeRunStatus(expectedRunId = null) {
             if (Number.isFinite(result.revision)) {
                 lastServerRevision = Math.max(lastServerRevision, result.revision);
             }
+            // 다른 탭이 이미 기록한 terminal이라 이벤트를 재생하지 않지만, 이 탭이
+            // 그 실행을 추적 중이었거나(currentRunId===runId) 추적 run 없이 실행 UI만
+            // 남아 있는 경우(예: 409에서 requested run을 정리해 currentRunId=null인데
+            // 시작 버튼이 잠긴 상태)에도 idle UI를 복원해야 계속 잠기지 않는다.
+            if (currentRunId === result.runId || (!currentRunId && !runStartPending)) {
+                finishTrackedRun(result.runId);
+                setCancelButtonState(false);
+                if (typeof enableBackupButton === 'function') {
+                    enableBackupButton();
+                } else {
+                    document.getElementById('startBtn').disabled = false;
+                }
+            }
             return { resolved: true, terminal: true, observed: true, result };
         }
         if (currentRunId && currentRunId !== result.runId) {
@@ -214,6 +368,11 @@ async function synchronizeRunStatus(expectedRunId = null) {
         }
         beginTrackingRun(result.runId, result.runStatus);
         restoreRunningUI(result.runStatus);
+        // HTTP로 active run을 채택하는 호출자(observe:true)는 terminal을 받을 경로를
+        // 보장한다. WebSocket이 없으면 관찰자가 폴링하고, 있으면 live 이벤트에 맡긴다.
+        // 단발 reconciliation(observe 미지정)이나 관찰자 자신의 재진입(lease 보유)은
+        // 관찰자를 새로 만들지 않는다.
+        if (options.observe) ensureObserver(result.runId);
         return { resolved: true, active: true, result };
     }
 
@@ -328,7 +487,7 @@ async function startBackup() {
             // HTTP 응답 자체가 없으면 서버가 요청을 수락한 뒤 응답만 유실됐을 수 있다.
             if (!runResult.status) {
                 if (terminalRunId === requestedRunId || currentRunId !== requestedRunId) return;
-                const reconciliation = await synchronizeRunStatus(requestedRunId);
+                const reconciliation = await synchronizeRunStatus(requestedRunId, { observe: true });
                 if (terminalRunId === requestedRunId) return;
                 if (!reconciliation?.mismatch && (reconciliation?.active || reconciliation?.terminal)) return;
                 if (currentRunId && currentRunId !== requestedRunId) return;
@@ -340,8 +499,62 @@ async function startBackup() {
                     document.getElementById('progressText').textContent = '서버 응답 유실 - 실행 상태 확인 필요';
                     addLogEntry('시작 응답과 상태 조회가 모두 실패해 실행 상태를 보수적으로 유지합니다.', 'warning');
                     alert('서버 응답을 확인하지 못했습니다. 백업이 실행 중일 수 있습니다.');
+                    // 불확실 시작: POST가 서버에 도달하지 못했다면 서버는 idle이라 열린
+                    // WebSocket에서도 이벤트가 오지 않는다. WebSocket 상태와 무관하게
+                    // active/idle/terminal/mismatch가 확정될 때까지 HTTP로 수렴한다(P1).
+                    ensureObserver(requestedRunId, { assumeActive: false });
                     return;
                 }
+            }
+
+            // 409: 다른 백업이 이미 활성 상태다. 이 시작 시도를 버리고 실제 실행에 동기화한다.
+            if (runResult.status === 409) {
+                runStartPending = false;
+                finishTrackedRun(requestedRunId, false);
+                const reconciliation = await synchronizeRunStatus(null, { observe: true });
+                // 조회 도중 다른 탭의 진행 이벤트가 실제 실행을 채택했을 수 있다(currentRunId).
+                if (reconciliation?.active || currentRunId) {
+                    addLogEntry('다른 백업이 이미 실행 중이어서 해당 실행에 연결했습니다.', 'warning');
+                    return; // WebSocket 유지: 진행 이벤트를 계속 수신한다.
+                }
+                if (reconciliation?.terminal) {
+                    return;
+                }
+                // 409를 준 실행이 조회 시점엔 이미 끝나 서버가 idle이면, 불확실한
+                // 실행 상태로 고정하지 말고 idle UI로 복구한다.
+                if (reconciliation?.idle) {
+                    setCancelButtonState(false);
+                    if (typeof enableBackupButton === 'function') {
+                        enableBackupButton();
+                    } else {
+                        document.getElementById('startBtn').disabled = false;
+                    }
+                    if (ws) {
+                        ws.close();
+                        ws = null;
+                    }
+                    return;
+                }
+                // 조회 도중 WebSocket terminal 이벤트나 새 실행이 이미 최신 상태를
+                // 적용해 조회 결과가 stale이면, 오래된 결과로 불확실 상태를 덮어쓰지
+                // 않고 이미 반영된 상태를 그대로 유지한다. 이를 처리하지 않으면 완료된
+                // 실행이 currentRunId·WebSocket 없이 running으로 부활한다.
+                if (reconciliation?.stale) {
+                    return;
+                }
+                // 상태 조회는 실패했지만 409는 실행 중임을 확정한다. idle로 되돌려
+                // 다시 시작 버튼을 열지 말고, WebSocket을 유지한 채 보수적으로 실행 중
+                // 상태를 유지한다. 이후 진행 이벤트가 도착하면 실행 UI가 복구된다.
+                runRequestSent = true;
+                runStatus = 'running';
+                isRunning = true;
+                runStateRevision++;
+                setCancelButtonState(false); // 실행 ID를 몰라 이 탭에서는 취소할 수 없다.
+                document.getElementById('startBtn').disabled = true;
+                document.getElementById('progressSection').style.display = 'block';
+                document.getElementById('progressText').textContent = '다른 백업 실행 중 - 상태 확인 필요';
+                addLogEntry('다른 백업이 실행 중이지만 상태를 확인하지 못했습니다. 진행 상황 수신을 기다립니다.', 'warning');
+                return; // WebSocket 유지
             }
             throw new Error('백업 시작 실패: ' + message);
         }
@@ -427,6 +640,10 @@ async function cancelBackup() {
     }
 
     runCancelPending = true;
+    // 취소 의도를 새 세대로 표시한다. 취소 직전에 시작돼 아직 도착하지 않은 status
+    // 조회는 requestedRevision이 어긋나 stale로 폐기되므로, 늦은 running 응답이
+    // restoreRunningUI를 거쳐 취소 의도를 덮어쓰지 못한다(P1-c).
+    runStateRevision++;
     setCancelButtonState(true, true);
     const cancelRunId = currentRunId;
 
@@ -440,8 +657,13 @@ async function cancelBackup() {
                 if (currentRunId !== cancelRunId || (cancelRunId && terminalRunId === cancelRunId)) return;
                 runCancelPending = false;
                 setCancelButtonState(true);
-                const reconciliation = await synchronizeRunStatus(cancelRunId);
-                if (currentRunId === cancelRunId && (reconciliation?.mismatch || reconciliation?.idle)) {
+                const reconciliation = await synchronizeRunStatus(cancelRunId, { observe: true });
+                // 취소 대상 실행이 사라졌거나(mismatch/idle), 서버 재시작으로 epoch가
+                // 바뀌어 currentRunId가 초기화된 경우, 새 활성 실행에 붙지 않았다면
+                // 시작 버튼을 복구한다. currentRunId === cancelRunId만 보면 epoch
+                // 초기화 시 복구 조건이 실행되지 않아 버튼이 잠긴다.
+                const runGone = reconciliation?.mismatch || reconciliation?.idle || currentRunId !== cancelRunId;
+                if (runGone && !reconciliation?.active) {
                     finishTrackedRun(cancelRunId, false);
                     setCancelButtonState(false);
                     if (typeof enableBackupButton === 'function') {
@@ -449,9 +671,29 @@ async function cancelBackup() {
                     } else {
                         document.getElementById('startBtn').disabled = false;
                     }
-                    await synchronizeRunStatus();
+                    await synchronizeRunStatus(null, { observe: true });
                 }
                 addLogEntry('취소 대상 실행이 일치하지 않아 서버 상태를 다시 확인했습니다.', 'warning');
+                return;
+            }
+
+            // status가 없는 실패는 네트워크 오류/timeout이다. 두 경우가 구분되지 않는다:
+            //   (1) 서버가 취소를 수락했지만 응답만 유실 → 서버는 cancelling/cancelled
+            //   (2) POST가 서버에 도달하지 못함 → 서버는 계속 running
+            // 취소를 낙관적으로 확정(runCancelRequested=true)하면 (2)에서 서버가 계속
+            // running을 반환해도 재취소가 영구 차단된다. 대신 의도를 확정하지 않고 서버
+            // 실제 상태로 수렴시킨다: 관찰자의 조회가 cancelling/cancelled면
+            // restoreRunningUI가 취소를 확정하고, 계속 running이면 취소 버튼을 열어
+            // 재취소를 허용한다(P1-a). 오래된 진행 이벤트는 revision 증가로 무효화한다.
+            if (!cancelResult.status) {
+                if (currentRunId !== cancelRunId || (cancelRunId && terminalRunId === cancelRunId)) return;
+                addLogEntry('취소 응답을 받지 못했습니다. 서버 상태를 확인합니다.', 'warning');
+                runCancelPending = false;
+                runStateRevision++;
+                setCancelButtonState(true); // 서버가 계속 running이면 재취소가 가능해야 한다
+                if (!isSocketOpen()) {
+                    await observeRunUntilTerminal(cancelRunId);
+                }
                 return;
             }
 
@@ -474,8 +716,11 @@ async function cancelBackup() {
         setCancelButtonState(false);
         document.getElementById('progressText').textContent = '취소 요청 중...';
 
-        if (!ws) {
-            addLogEntry('취소 요청은 전달되었지만 연결이 끊겨 완료 상태를 확인할 수 없습니다.', 'warning');
+        if (!isSocketOpen()) {
+            // WebSocket이 열려 있지 않으면 terminal 이벤트를 받지 못해 UI가 잠긴다.
+            // durable observer가 재연결을 시도하고, 안 되면 terminal까지 폴링한다.
+            addLogEntry('취소 요청은 전달되었지만 연결이 끊겨 상태를 확인합니다.', 'warning');
+            await observeRunUntilTerminal(cancelRunId);
         } else {
             addLogEntry('백업 취소 요청을 서버에 전달했습니다.', 'warning');
         }
@@ -553,6 +798,12 @@ function connectWebSocket() {
 
 function handleWebSocketClose(event, backupMayStillBeRunning, cancelInProgress) {
     console.log('WebSocket closed');
+    // 이미 관찰자가 복구를 소유 중이면(대개 관찰자 자신의 재연결 시도가 실패해 발생한
+    // onclose) 중복 관찰자·로그·alert를 만들지 않고 관찰자에 맡긴다. 관찰자가 스폰한
+    // WebSocket close가 다시 관찰자를 스폰해 backoff/lease를 리셋하던 재귀를 끊는다.
+    if (backupMayStillBeRunning && runningObserverToken !== null) {
+        return;
+    }
     addLogEntry(`WebSocket 연결 종료 (Code: ${event.code})`, 'warning');
     if (!backupMayStillBeRunning) {
         return;
@@ -562,13 +813,25 @@ function handleWebSocketClose(event, backupMayStillBeRunning, cancelInProgress) 
         setCancelButtonState(false);
         const progressText = document.getElementById('progressText');
         if (progressText) {
-            progressText.textContent = '취소 요청됨 - 완료 상태 확인 불가';
+            progressText.textContent = '취소 요청됨 - 완료 상태 확인 중...';
         }
-        addLogEntry('취소 요청 처리 중 연결이 종료되어 완료 상태를 확인할 수 없습니다.', 'warning');
+        addLogEntry('취소 요청 처리 중 연결이 종료되어 상태를 폴링합니다.', 'warning');
+        // 취소 진행 중 연결이 끊기면 terminal 이벤트를 받을 경로가 없다. 관찰자를
+        // 시작해 완료까지 폴링한다(위 lease 가드로 이미 관찰자가 있으면 여기 도달 안 함).
+        // 단, 취소 HTTP 요청이 아직 pending이면 여기서 폴링을 시작하지 않는다. 요청이
+        // settle되기 전 서버는 아직 running을 응답하고, 그 snapshot이 restoreRunningUI를
+        // 거쳐 runCancelPending을 해제하고 취소 버튼을 다시 열어버린다. 요청 자신이
+        // settle 후 !isSocketOpen() 경로에서 수렴을 시작하므로 pending 동안은 맡긴다.
+        if (currentRunId && !runCancelPending) {
+            observeRunUntilTerminal(currentRunId);
+        }
     } else {
         // 실행 여부는 서버 상태가 확정할 때까지 유지하고 HTTP 취소는 계속 허용한다.
         setCancelButtonState(true);
         addLogEntry('서버와의 연결이 끊겼습니다. 백업 상태를 확인할 수 없습니다.', 'error');
+        // 정상 실행 중 연결이 끊기면 terminal 이벤트를 받을 경로가 없다. 관찰자를 시작해
+        // 재연결 시도 + terminal 폴링으로 UI가 running에 잠기지 않게 한다.
+        ensureObserver(currentRunId);
     }
 
     if (!hasShownCloseAlert) {
@@ -586,6 +849,21 @@ function handleProgressUpdate(update) {
 
     if (update.type === 'complete' || update.type === 'cancelled' || update.type === 'error') {
         rememberTerminalRun(update.server_id || lastServerId, update.run_id);
+    }
+
+    // 다른 탭에서 시작된 실행을 이 탭이 진행 이벤트로 처음 감지한 경우, 실행 UI를
+    // 복구해 이 탭에서도 취소할 수 있게 한다. 시작 버튼은 경로 검증 등으로 이미
+    // 비활성일 수 있으므로, 실행 중이며 취소 요청이 없는데 취소 버튼이 비활성인
+    // 상태(=아직 실행 UI를 세우지 않음)를 최초 감지 신호로 사용한다.
+    if (update.type === 'status' || update.type === 'analysis_progress' || update.type === 'progress') {
+        // runCancelPending도 제외한다: 취소 HTTP 요청이 진행 중일 때 restoreRunningUI가
+        // runCancelPending을 초기화하고 취소 버튼을 다시 활성화하면 안 된다.
+        if (isRunning && !runStartPending && !runCancelRequested && !runCancelPending) {
+            const cancelBtn = document.getElementById('cancelBtn');
+            if (cancelBtn && cancelBtn.disabled) {
+                restoreRunningUI('running');
+            }
+        }
     }
 
     const progressBar = document.getElementById('progressBar');
@@ -669,10 +947,17 @@ function handleProgressUpdate(update) {
             document.getElementById('startBtn').disabled = false;
         }
 
-        // UI 초기화
-        resetBackupUI('오류 발생');
-
         const errorMessage = update.error || '알 수 없는 오류';
+        if (update.summary) {
+            // 부분 실패: 성공/실패 집계를 유지해 사용자가 무엇이 처리됐는지 볼 수 있게 한다.
+            progressBar.classList.remove('pulse');
+            progressBar.style.width = '100%';
+            progressPercent.textContent = '100%';
+            progressText.textContent = '오류로 종료됨';
+            showSummary(update.summary);
+        } else {
+            resetBackupUI('오류 발생');
+        }
         addLogEntry('오류 발생: ' + errorMessage, 'error');
         alert('오류: ' + errorMessage);
 
@@ -719,7 +1004,9 @@ async function initializeRunTracking() {
         addLogEntry(`초기 WebSocket 연결 실패: ${error.message}`, 'warning');
     }
     if (initializationRevision !== runStateRevision) return;
-    await synchronizeRunStatus();
+    // 페이지 로드 시 active run을 채택하면 관찰자를 보장한다: WebSocket 연결에 실패했다면
+    // HTTP 폴링으로 terminal까지 수렴해야 UI가 running에 잠기지 않는다(P1).
+    await synchronizeRunStatus(null, { observe: true });
 }
 
 window.addEventListener('DOMContentLoaded', initializeRunTracking);

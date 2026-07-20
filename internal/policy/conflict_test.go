@@ -9,6 +9,30 @@ import (
 	"github.com/On-Jun9/ShutterPipe/pkg/types"
 )
 
+// TestConflictResolver_StatErrorSurfacesAsFailureNotSkip는 목적지 stat 오류가
+// "이미 존재함"으로 오판되어 조용히 skip 처리되지 않고 실패로 노출되는지 검증한다.
+func TestConflictResolver_StatErrorSurfacesAsFailureNotSkip(t *testing.T) {
+	tmpDir := t.TempDir()
+	blocker := filepath.Join(tmpDir, "blocker")
+	if err := os.WriteFile(blocker, []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// 일반 파일 아래 경로를 stat하면 ENOENT가 아니라 ENOTDIR가 반환된다.
+	destUnderFile := filepath.Join(blocker, "photo.jpg")
+	resolver := NewConflictResolver(types.ConflictPolicySkip, filepath.Join(tmpDir, "quarantine"))
+
+	res := resolver.Resolve(&types.CopyTask{
+		Source:   types.FileEntry{Name: "photo.jpg"},
+		DestPath: destUnderFile,
+	})
+	if res.Err == nil {
+		t.Fatal("stat 오류는 resolution 오류로 노출되어야 한다")
+	}
+	if res.Skip {
+		t.Fatal("stat 오류를 skip으로 처리하면 안 된다")
+	}
+}
+
 // TestConflictResolver_NoConflict는 테스트 코드 동작을 검증하거나 보조합니다.
 func TestConflictResolver_NoConflict(t *testing.T) {
 	tmpDir := t.TempDir()
@@ -223,9 +247,45 @@ func TestConflictResolver_GenerateUniqueName_ReturnsOriginalWhenExhausted(t *tes
 	}
 
 	resolver := NewConflictResolver(types.ConflictPolicyRename, filepath.Join(tmpDir, "quarantine"))
-	got := resolver.generateUniqueName(original)
+	got, err := resolver.generateUniqueName(original)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	if got != original {
 		t.Fatalf("expected original path when candidates exhausted, got %s", got)
+	}
+}
+
+// TestConflictResolver_QuarantineCandidateStatErrorSurfacesAsFailure는 격리 후보
+// 경로(별도 quarantine 디렉터리)의 stat 오류가 조용한 skip이 아니라 실패로
+// 노출되는지 검증한다. quarantine 후보는 목적지 디렉터리와 분리되어 있어 최초
+// 목적지 stat과 독립적으로 오류를 재현할 수 있다.
+func TestConflictResolver_QuarantineCandidateStatErrorSurfacesAsFailure(t *testing.T) {
+	tmpDir := t.TempDir()
+	destDir := filepath.Join(tmpDir, "dest")
+	if err := os.MkdirAll(destDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(destDir, "photo.jpg")
+	if err := os.WriteFile(dest, []byte("x"), 0644); err != nil { // 존재 → 충돌 → quarantine 분기
+		t.Fatal(err)
+	}
+	// quarantine 디렉터리를 일반 파일로 만들어 그 하위 후보 stat이 ENOTDIR가 되게 한다.
+	quarantineAsFile := filepath.Join(tmpDir, "quarantine")
+	if err := os.WriteFile(quarantineAsFile, []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	resolver := NewConflictResolver(types.ConflictPolicyQuarantine, quarantineAsFile)
+	res := resolver.Resolve(&types.CopyTask{
+		Source:   types.FileEntry{Name: "photo.jpg"},
+		DestPath: dest,
+	})
+	if res.Err == nil {
+		t.Fatal("격리 후보 stat 오류는 resolution 오류로 노출되어야 한다")
+	}
+	if res.Skip {
+		t.Fatal("격리 후보 stat 오류를 skip으로 처리하면 안 된다")
 	}
 }

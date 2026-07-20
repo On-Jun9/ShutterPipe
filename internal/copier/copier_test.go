@@ -829,3 +829,38 @@ func TestCopierRejectsQuarantineSymlinkEscapeBeforeCreatingOutsideDirectories(t 
 		t.Fatalf("outside quarantine directory was created before rejection: %v", err)
 	}
 }
+
+// TestMovePartNoReplacePreservesNoClobber는 exFAT fallback 추가 이후에도 기존
+// 파일을 덮어쓰지 않고 os.ErrExist를 유지하며, 신규 파일은 정상 publish하는지
+// 검증한다. (fallback 자체는 exFAT/FAT 실기 환경에서 확인한다.)
+func TestMovePartNoReplacePreservesNoClobber(t *testing.T) {
+	dir := t.TempDir()
+
+	// 신규 대상: part를 finalDest로 publish하고 part는 제거되어야 한다.
+	partPath := filepath.Join(dir, ".photo.part")
+	finalDest := filepath.Join(dir, "photo.jpg")
+	if err := os.WriteFile(partPath, []byte("new"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := movePartNoReplace(partPath, finalDest); err != nil {
+		t.Fatalf("신규 대상 publish 실패: %v", err)
+	}
+	if _, err := os.Stat(partPath); !os.IsNotExist(err) {
+		t.Fatalf("publish 후 part 파일이 남아 있음: %v", err)
+	}
+	if data, err := os.ReadFile(finalDest); err != nil || string(data) != "new" {
+		t.Fatalf("publish 내용 불일치: data=%q err=%v", data, err)
+	}
+
+	// 기존 파일 존재: 덮어쓰지 않고 os.ErrExist를 반환해야 한다.
+	part2 := filepath.Join(dir, ".photo2.part")
+	if err := os.WriteFile(part2, []byte("intruder"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := movePartNoReplace(part2, finalDest); !errors.Is(err, os.ErrExist) {
+		t.Fatalf("기존 파일이 있을 때 os.ErrExist를 기대했으나 got %v", err)
+	}
+	if data, err := os.ReadFile(finalDest); err != nil || string(data) != "new" {
+		t.Fatalf("기존 파일이 덮어써짐: data=%q err=%v", data, err)
+	}
+}
