@@ -399,3 +399,24 @@ input[type="number"].input-modern::-webkit-outer-spin-button {
   font-size: 11px;
   font-weight: 500;
 }
+
+/* ==================== Input Error State ==================== */
+.input-modern.input-error {
+  border-color: #ef4444;
+  background: #fef2f2;
+}
+
+.input-modern.input-error:focus {
+  border-color: #dc2626;
+  box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.1);
+}
+
+.path-input-group.has-error .input-modern {
+  border-color: #ef4444;
+  background: #fef2f2;
+}
+
+.path-input-group.has-error .input-modern:focus {
+  border-color: #dc2626;
+  box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.1);
+}

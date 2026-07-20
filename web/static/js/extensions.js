@@ -11,10 +11,17 @@ function renderExtensionTags() {
     includeExtensions.forEach(ext => {
         const tag = document.createElement('div');
         tag.className = 'tag';
-        tag.innerHTML = `
-            ${ext}
-            <span class="tag-remove" onclick="removeExtension('${ext}')">&times;</span>
-        `;
+
+        // Use textContent to prevent XSS
+        const extText = document.createTextNode(ext + ' ');
+        tag.appendChild(extText);
+
+        const removeBtn = document.createElement('span');
+        removeBtn.className = 'tag-remove';
+        removeBtn.textContent = '×';
+        removeBtn.dataset.ext = ext; // Use data attribute instead of onclick
+
+        tag.appendChild(removeBtn);
         container.appendChild(tag);
     });
 }
@@ -66,3 +73,18 @@ function handleExtensionInput(event) {
         input.value = '';
     }
 }
+
+// Event delegation for tag remove buttons
+document.addEventListener('DOMContentLoaded', () => {
+    const container = document.getElementById('extensionTagsContainer');
+    if (container) {
+        container.addEventListener('click', (e) => {
+            if (e.target.classList.contains('tag-remove')) {
+                const ext = e.target.dataset.ext;
+                if (ext) {
+                    removeExtension(ext);
+                }
+            }
+        });
+    }
+});

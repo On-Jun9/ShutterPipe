@@ -70,22 +70,25 @@ function renderPresetList() {
             tags.push('이전 기록 무시');
         }
 
+        const escapedName = escapeHtml(preset.name);
+        const escapedDesc = escapeHtml(preset.description);
+        // Use data attributes and event delegation instead of inline onclick for better security
         return `
-            <div class="preset-card" data-preset-name="${preset.name}">
+            <div class="preset-card" data-preset-name="${escapedName}">
                 <div class="preset-card-header">
-                    <div class="preset-card-title">${preset.name}</div>
+                    <div class="preset-card-title">${escapedName}</div>
                     <div class="preset-card-actions">
-                        <button class="preset-card-btn load" onclick="loadPresetByName('${preset.name}')" title="불러오기">
+                        <button class="preset-card-btn load" data-action="load" data-preset="${escapedName}" title="불러오기">
                             ↓
                         </button>
-                        <button class="preset-card-btn delete" onclick="deletePresetByName('${preset.name}')" title="삭제">
+                        <button class="preset-card-btn delete" data-action="delete" data-preset="${escapedName}" title="삭제">
                             ×
                         </button>
                     </div>
                 </div>
-                ${preset.description ? `<div class="preset-card-description">${preset.description}</div>` : ''}
+                ${preset.description ? `<div class="preset-card-description">${escapedDesc}</div>` : ''}
                 <div class="preset-card-meta">
-                    ${tags.map(tag => `<span class="preset-card-tag">${tag}</span>`).join('')}
+                    ${tags.map(tag => `<span class="preset-card-tag">${escapeHtml(tag)}</span>`).join('')}
                 </div>
             </div>
         `;
@@ -177,11 +180,15 @@ async function savePreset() {
     }
 
     // 현재 설정 수집
+    const jobsInput = document.getElementById('jobs');
+    const jobsValue = jobsInput?.value;
+    const jobsParsed = parseInt(jobsValue);
+
     const config = {
         source: document.getElementById('source').value,
         dest: document.getElementById('dest').value,
         include_extensions: typeof includeExtensions !== 'undefined' ? includeExtensions : [],
-        jobs: parseInt(document.getElementById('jobs')?.value || '4'),
+        jobs: isNaN(jobsParsed) ? 0 : jobsParsed,
         dedup_method: document.getElementById('dedupMethod').value,
         conflict_policy: document.getElementById('conflictPolicy').value,
         organize_strategy: document.getElementById('organizeStrategy').value,
@@ -310,4 +317,22 @@ document.head.appendChild(style);
 // 페이지 로드 시 프리셋 목록 로드
 window.addEventListener('DOMContentLoaded', () => {
     loadPresetList();
+
+    // Event delegation for preset card buttons
+    const presetList = document.getElementById('presetList');
+    if (presetList) {
+        presetList.addEventListener('click', (e) => {
+            const btn = e.target.closest('.preset-card-btn');
+            if (!btn) return;
+
+            const action = btn.dataset.action;
+            const presetName = btn.dataset.preset;
+
+            if (action === 'load') {
+                loadPresetByName(presetName);
+            } else if (action === 'delete') {
+                deletePresetByName(presetName);
+            }
+        });
+    }
 });

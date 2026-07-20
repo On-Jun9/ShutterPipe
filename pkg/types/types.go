@@ -48,6 +48,13 @@ type CopyTask struct {
 	Error string
 	// Action indicates what action was taken (copied, skipped, renamed, etc.).
 	Action CopyAction
+	// ConflictPolicy is retained through commit so a destination created after
+	// planning still follows the selected policy.
+	ConflictPolicy ConflictPolicy
+	// QuarantineDir is the commit-time fallback destination for quarantine.
+	QuarantineDir string
+	// DestinationRoot constrains commit paths after resolving existing symlinks.
+	DestinationRoot string
 }
 
 // TaskStatus represents the status of a copy task.
@@ -117,6 +124,9 @@ type RunSummary struct {
 	Duration       time.Duration
 	BytesCopied    int64
 	BytesPerSecond float64
+	// Warnings reports non-copy failures, such as state or history persistence
+	// errors, without misclassifying successfully copied files as failed.
+	Warnings []string
 }
 
 // ConfigPreset represents a saved configuration preset.
@@ -176,4 +186,47 @@ type Bookmarks struct {
 	Source    []string  `json:"source"`
 	Dest      []string  `json:"dest"`
 	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// BackupStatus represents the status of a backup operation.
+type BackupStatus string
+
+const (
+	BackupStatusSuccess  BackupStatus = "success"
+	BackupStatusFailed   BackupStatus = "failed"
+	BackupStatusCanceled BackupStatus = "canceled"
+)
+
+// BackupConfig contains the configuration used for a backup operation.
+type BackupConfig struct {
+	Source            string           `json:"source"`
+	Dest              string           `json:"dest"`
+	OrganizeStrategy  OrganizeStrategy `json:"organize_strategy"`
+	EventName         string           `json:"event_name,omitempty"`
+	ConflictPolicy    ConflictPolicy   `json:"conflict_policy"`
+	DedupMethod       DedupMethod      `json:"dedup_method"`
+	DryRun            bool             `json:"dry_run"`
+	HashVerify        bool             `json:"hash_verify"`
+	IgnoreState       bool             `json:"ignore_state"`
+	DateFilterStart   string           `json:"date_filter_start,omitempty"`
+	DateFilterEnd     string           `json:"date_filter_end,omitempty"`
+	Jobs              int              `json:"jobs"`
+	IncludeExtensions []string         `json:"include_extensions"`
+	UnclassifiedDir   string           `json:"unclassified_dir"`
+	QuarantineDir     string           `json:"quarantine_dir"`
+}
+
+// BackupHistoryEntry represents a single backup session record.
+type BackupHistoryEntry struct {
+	ID        string       `json:"id"`
+	Summary   RunSummary   `json:"summary"`
+	Config    BackupConfig `json:"config"`
+	Status    BackupStatus `json:"status"`
+	CreatedAt time.Time    `json:"created_at"`
+}
+
+// BackupHistory stores the collection of backup history entries.
+type BackupHistory struct {
+	Entries   []BackupHistoryEntry `json:"entries"`
+	UpdatedAt time.Time            `json:"updated_at"`
 }

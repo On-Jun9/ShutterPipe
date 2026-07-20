@@ -1,11 +1,12 @@
 package metadata
 
 import (
+	"context"
 	"os"
 	"time"
 
-	"github.com/rwcarlsen/goexif/exif"
 	"github.com/On-Jun9/ShutterPipe/pkg/types"
+	"github.com/rwcarlsen/goexif/exif"
 )
 
 type EXIFExtractor struct{}
@@ -15,13 +16,22 @@ func NewEXIFExtractor() *EXIFExtractor {
 }
 
 func (e *EXIFExtractor) Extract(entry types.FileEntry) types.MediaMetadata {
+	return e.ExtractWithContext(context.Background(), entry)
+}
+
+func (e *EXIFExtractor) ExtractWithContext(ctx context.Context, entry types.FileEntry) types.MediaMetadata {
+	ctx = normalizeContext(ctx)
+	if err := ctx.Err(); err != nil {
+		return types.MediaMetadata{Error: err.Error()}
+	}
+
 	f, err := os.Open(entry.Path)
 	if err != nil {
 		return types.MediaMetadata{Error: err.Error()}
 	}
 	defer f.Close()
 
-	x, err := exif.Decode(f)
+	x, err := exif.Decode(contextReader{ctx: ctx, r: f})
 	if err != nil {
 		return types.MediaMetadata{Error: "no EXIF data: " + err.Error()}
 	}
