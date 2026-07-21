@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/On-Jun9/ShutterPipe/pkg/types"
 	"github.com/gorilla/mux"
 )
 
@@ -27,6 +28,8 @@ type Server struct {
 	shuttingDown   bool
 	serverID       string
 	serverIDOnce   sync.Once
+	verifyResultMu sync.Mutex
+	latestVerify   *retainedVerification
 }
 
 func NewServer() *Server {
@@ -58,6 +61,8 @@ func (s *Server) setupRoutes() {
 	api.HandleFunc("/run", s.handleRun).Methods("POST")
 	api.HandleFunc("/run/cancel", s.handleCancelRun).Methods("POST")
 	api.HandleFunc("/run/status", s.handleRunStatus).Methods("GET")
+	api.HandleFunc("/verify", s.handleVerify).Methods("POST")
+	api.HandleFunc("/verify/requeue", s.handleVerifyRequeue).Methods("POST")
 	api.HandleFunc("/ws", s.handleWebSocket)
 
 	// Preset routes
@@ -131,18 +136,31 @@ func (s *Server) Shutdown(ctx context.Context) error {
 }
 
 func (s *Server) startRun(runID string) (context.Context, context.CancelFunc, RunStatusResponse, error) {
+	return s.startRunKind(runID, types.RunKindBackup)
+}
+
+func (s *Server) startRunKind(runID string, kind types.RunKind) (context.Context, context.CancelFunc, RunStatusResponse, error) {
 	s.runLifecycleMu.Lock()
 	defer s.runLifecycleMu.Unlock()
 	if s.shuttingDown {
 		return nil, nil, RunStatusResponse{}, http.ErrServerClosed
 	}
 	runCtx, cancel := context.WithCancel(s.runContext())
-	status, err := s.runs().TryStart(runID, cancel)
+	status, err := s.runs().TryStartKind(runID, kind, cancel)
 	if err != nil {
 		cancel()
 		return nil, nil, status, err
 	}
 	return runCtx, cancel, status, nil
+}
+
+func (s *Server) startMutation() (func(), error) {
+	s.runLifecycleMu.Lock()
+	defer s.runLifecycleMu.Unlock()
+	if s.shuttingDown {
+		return nil, http.ErrServerClosed
+	}
+	return s.runs().TryBeginMutation()
 }
 
 func (s *Server) isShuttingDown() bool {

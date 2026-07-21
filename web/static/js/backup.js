@@ -27,9 +27,13 @@ function terminalObservationKey(serverId, runId) {
     return `${serverId || 'unknown'}:${runId || ''}`;
 }
 
-function hasObservedTerminalRun(serverId, runId) {
+function hasObservedTerminalInPage(serverId, runId) {
     const key = terminalObservationKey(serverId, runId);
-    if (observedTerminalRuns.has(key)) return true;
+    return observedTerminalRuns.has(key);
+}
+
+function hasPersistedTerminalRun(serverId, runId) {
+    const key = terminalObservationKey(serverId, runId);
     try {
         return window.sessionStorage?.getItem(terminalObservationStorageKey) === key;
     } catch (_error) {
@@ -79,8 +83,9 @@ function createRunId() {
     return `run-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
-function beginTrackingRun(runId, status = 'running') {
+function beginTrackingRun(runId, status = 'running', kind = null) {
     currentRunId = runId;
+    currentRunKind = kind || currentRunKind || 'backup';
     terminalRunId = null;
     runStatus = status;
     isRunning = status !== 'idle';
@@ -95,6 +100,7 @@ function observeServerInstance(serverId) {
         retiredServerIds.add(lastServerId);
         lastServerRevision = 0;
         currentRunId = null;
+        currentRunKind = null;
         terminalRunId = null;
         runStatus = 'idle';
         isRunning = false;
@@ -119,6 +125,7 @@ function finishTrackedRun(runId, markTerminal = true) {
         terminalRunId = runId || currentRunId;
     }
     currentRunId = null;
+    currentRunKind = null;
     runStatus = 'idle';
     isRunning = false;
     runStartPending = false;
@@ -147,9 +154,11 @@ function acceptProgressUpdate(update) {
         return false;
     }
     if (!currentRunId) {
-        beginTrackingRun(runId);
+        beginTrackingRun(runId, 'running', update.kind || null);
         runStartPending = false;
         runRequestSent = true;
+    } else if (update.kind) {
+        currentRunKind = update.kind;
     }
     if (Number.isFinite(update.revision)) {
         lastServerRevision = Math.max(lastServerRevision, update.revision);
@@ -169,7 +178,13 @@ function restoreRunningUI(status) {
         runCancelRequested = status === 'cancelling';
     }
     const showCancelling = cancelActive || status === 'cancelling';
-    document.getElementById('startBtn').disabled = true;
+    setRunStartButtonsDisabled(true);
+    const dryRun = document.getElementById('dryRun');
+    if (dryRun) dryRun.disabled = currentRunKind === 'verify';
+    // 새로고침 복구 시 모드 탭을 실제 실행 종류에 맞춘다 (검증 실행 중인데 백업 탭이
+    // 활성으로 보이는 시각적 불일치 방지). 잠긴 라디오라도 프로그램적 설정은 반영된다.
+    const modeRadio = document.getElementById(currentRunKind === 'verify' ? 'mode-verify' : 'mode-backup');
+    if (modeRadio) modeRadio.checked = true;
     setCancelButtonState(showCancelling ? false : status === 'running');
 
     const progressSection = document.getElementById('progressSection');
@@ -178,8 +193,41 @@ function restoreRunningUI(status) {
     if (progressText) {
         progressText.textContent = showCancelling
             ? '취소 요청 중...'
-            : '실행 중인 백업에 다시 연결되었습니다.';
+            : `실행 중인 ${currentRunKind === 'verify' ? '검증' : '백업'}에 다시 연결되었습니다.`;
     }
+}
+
+// 백업/검증 모드 전환 잠금 (실행 중 true, idle false). DOM 조작은 이 한 곳에만 둔다.
+function setRunModeTabsLocked(locked) {
+    ['mode-backup', 'mode-verify'].forEach((id) => {
+        const radio = document.getElementById(id);
+        if (radio) radio.disabled = locked;
+    });
+    const modeHeader = document.getElementById('run-mode-tabs');
+    if (modeHeader && modeHeader.classList) {
+        if (locked) modeHeader.classList.add('locked');
+        else modeHeader.classList.remove('locked');
+    }
+}
+
+function setRunStartButtonsDisabled(disabled) {
+    ['startBtn', 'verifyBtn'].forEach((id) => {
+        const button = document.getElementById(id);
+        if (button) button.disabled = disabled;
+    });
+    setRunModeTabsLocked(disabled);
+}
+
+function restoreIdleRunControls() {
+    const dryRun = document.getElementById('dryRun');
+    if (dryRun) dryRun.disabled = false;
+    if (typeof enableBackupButton === 'function') {
+        enableBackupButton();
+    } else {
+        setRunStartButtonsDisabled(false);
+    }
+    // enableBackupButton은 버튼만 다시 켜고 탭 잠금은 모르므로, idle 복귀 시 여기서 해제한다.
+    setRunModeTabsLocked(false);
 }
 
 function finishStaleTrackedRun(runId) {
@@ -189,11 +237,7 @@ function finishStaleTrackedRun(runId) {
     // UI를 깨지 않도록 버튼 복구를 건너뛴다.
     if (finishTrackedRun(runId, false)) {
         setCancelButtonState(false);
-        if (typeof enableBackupButton === 'function') {
-            enableBackupButton();
-        } else {
-            document.getElementById('startBtn').disabled = false;
-        }
+        restoreIdleRunControls();
     }
     // 새 active run을 채택하면 관찰자를 보장한다(관찰자 mismatch 경로에서 호출된 경우엔
     // lease를 이미 보유해 no-op이고, handoff는 별도로 소유권을 넘긴다).
@@ -323,7 +367,9 @@ async function synchronizeRunStatus(expectedRunId = null, options = {}) {
         if (!result.runId || terminalRunId === result.runId) {
             return { resolved: true, terminal: true, result };
         }
-        if (hasObservedTerminalRun(result.serverId, result.runId)) {
+        const restoreVerifyResult = result.runKind === 'verify' && !!result.verifySummary;
+        if (hasObservedTerminalInPage(result.serverId, result.runId) ||
+            (hasPersistedTerminalRun(result.serverId, result.runId) && !restoreVerifyResult)) {
             terminalRunId = result.runId;
             if (Number.isFinite(result.revision)) {
                 lastServerRevision = Math.max(lastServerRevision, result.revision);
@@ -335,11 +381,7 @@ async function synchronizeRunStatus(expectedRunId = null, options = {}) {
             if (currentRunId === result.runId || (!currentRunId && !runStartPending)) {
                 finishTrackedRun(result.runId);
                 setCancelButtonState(false);
-                if (typeof enableBackupButton === 'function') {
-                    enableBackupButton();
-                } else {
-                    document.getElementById('startBtn').disabled = false;
-                }
+                restoreIdleRunControls();
             }
             return { resolved: true, terminal: true, observed: true, result };
         }
@@ -350,10 +392,14 @@ async function synchronizeRunStatus(expectedRunId = null, options = {}) {
             type: result.runStatus,
             run_id: result.runId,
             server_id: result.serverId,
+            kind: result.runKind,
             summary: result.summary,
+            verify_summary: result.verifySummary,
             error: result.error,
             revision: result.revision,
-            message: result.runStatus === 'cancelled' ? '백업이 취소되었습니다.' : undefined
+            message: result.runStatus === 'cancelled'
+                ? `${result.runKind === 'verify' ? '검증' : '백업'}이 취소되었습니다.`
+                : undefined
         });
         return { resolved: true, terminal: true, result };
     }
@@ -366,7 +412,7 @@ async function synchronizeRunStatus(expectedRunId = null, options = {}) {
         if (Number.isFinite(result.revision)) {
             lastServerRevision = Math.max(lastServerRevision, result.revision);
         }
-        beginTrackingRun(result.runId, result.runStatus);
+        beginTrackingRun(result.runId, result.runStatus, result.runKind);
         restoreRunningUI(result.runStatus);
         // HTTP로 active run을 채택하는 호출자(observe:true)는 terminal을 받을 경로를
         // 보장한다. WebSocket이 없으면 관찰자가 폴링하고, 있으면 live 이벤트에 맡긴다.
@@ -386,23 +432,21 @@ async function synchronizeRunStatus(expectedRunId = null, options = {}) {
         }
         finishTrackedRun(currentRunId, false);
         setCancelButtonState(false);
-        if (typeof enableBackupButton === 'function') {
-            enableBackupButton();
-        } else {
-            document.getElementById('startBtn').disabled = false;
-        }
+        restoreIdleRunControls();
     }
     return { resolved: true, idle: result.runStatus === 'idle', result };
 }
 
-// 백업 시작
-async function startBackup() {
-    addLogEntry('백업 시작 버튼 클릭됨', 'info');
+// 백업과 검증은 동일한 실행 상태 머신을 공유한다.
+async function startBackup(kind = 'backup') {
+    const isVerify = kind === 'verify';
+    const operationLabel = isVerify ? '검증' : '백업';
+    addLogEntry(`${operationLabel} 시작 버튼 클릭됨`, 'info');
 
     // 중복 클릭 방지 (시작 중 또는 실행 중)
     if (isRunning || runStartPending) {
-        addLogEntry('이미 백업이 실행 중입니다.', 'warning');
-        alert('이미 백업이 실행 중입니다.');
+        addLogEntry('이미 다른 작업이 실행 중입니다.', 'warning');
+        alert('이미 백업 또는 검증이 실행 중입니다.');
         return;
     }
 
@@ -419,12 +463,14 @@ async function startBackup() {
     // 이제부터 모든 비동기 작업이 플래그 보호를 받음
     const requestedRunId = createRunId();
     runStartPending = true;
-    beginTrackingRun(requestedRunId);
+    beginTrackingRun(requestedRunId, 'running', kind);
     runRequestSent = false;
     runCancelPending = false;
     runCancelRequested = false;
     hasShownCloseAlert = false;  // 중복 알림 방지 플래그 초기화
-    document.getElementById('startBtn').disabled = true;
+    setRunStartButtonsDisabled(true);
+    const dryRunInput = document.getElementById('dryRun');
+    if (dryRunInput) dryRunInput.disabled = isVerify;
     setCancelButtonState(false);
 
     try {
@@ -448,7 +494,7 @@ async function startBackup() {
             event_name: document.getElementById('eventName').value,
             conflict_policy: document.getElementById('conflictPolicy').value,
             dedup_method: document.getElementById('dedupMethod').value,
-            dry_run: document.getElementById('dryRun').checked,
+            dry_run: isVerify ? false : document.getElementById('dryRun').checked,
             hash_verify: document.getElementById('hashVerify').checked,
             ignore_state: document.getElementById('ignoreState').checked,
 
@@ -465,6 +511,16 @@ async function startBackup() {
             log_file: document.getElementById('logFile').value,
             log_json: document.getElementById('logJson').checked
         };
+        let hashManifestFile = null;
+        if (isVerify) {
+            config.verify_mode = getVerifyMode();
+            if (config.verify_mode === 'hash' && document.getElementById('useHashManifest').checked) {
+                hashManifestFile = document.getElementById('hashManifest').files?.[0] || null;
+                if (!hashManifestFile) {
+                    throw new Error('도착 폴더 해시 목록 파일을 선택해주세요.');
+                }
+            }
+        }
         // Step 1: Connect WebSocket FIRST
         addLogEntry('WebSocket 연결 시도 중...', 'info');
         await connectWebSocket();
@@ -477,7 +533,9 @@ async function startBackup() {
 
         // Step 2: Send Run Request
         runRequestSent = true;
-        const runResult = await startBackupRunOnServer(config);
+        const runResult = isVerify
+            ? await startVerifyRunOnServer(config, hashManifestFile)
+            : await startBackupRunOnServer(config);
 
         const statusText = runResult.status || 'NETWORK_ERROR';
         addLogEntry(`서버 응답 수신: Status ${statusText}`, runResult.success ? 'success' : 'error');
@@ -498,7 +556,7 @@ async function startBackup() {
                     setCancelButtonState(true);
                     document.getElementById('progressText').textContent = '서버 응답 유실 - 실행 상태 확인 필요';
                     addLogEntry('시작 응답과 상태 조회가 모두 실패해 실행 상태를 보수적으로 유지합니다.', 'warning');
-                    alert('서버 응답을 확인하지 못했습니다. 백업이 실행 중일 수 있습니다.');
+                    alert(`서버 응답을 확인하지 못했습니다. ${operationLabel}이 실행 중일 수 있습니다.`);
                     // 불확실 시작: POST가 서버에 도달하지 못했다면 서버는 idle이라 열린
                     // WebSocket에서도 이벤트가 오지 않는다. WebSocket 상태와 무관하게
                     // active/idle/terminal/mismatch가 확정될 때까지 HTTP로 수렴한다(P1).
@@ -507,14 +565,14 @@ async function startBackup() {
                 }
             }
 
-            // 409: 다른 백업이 이미 활성 상태다. 이 시작 시도를 버리고 실제 실행에 동기화한다.
+            // 409: 다른 작업이 이미 활성 상태다. 이 시작 시도를 버리고 실제 실행에 동기화한다.
             if (runResult.status === 409) {
                 runStartPending = false;
                 finishTrackedRun(requestedRunId, false);
                 const reconciliation = await synchronizeRunStatus(null, { observe: true });
                 // 조회 도중 다른 탭의 진행 이벤트가 실제 실행을 채택했을 수 있다(currentRunId).
                 if (reconciliation?.active || currentRunId) {
-                    addLogEntry('다른 백업이 이미 실행 중이어서 해당 실행에 연결했습니다.', 'warning');
+                    addLogEntry('다른 작업이 이미 실행 중이어서 해당 실행에 연결했습니다.', 'warning');
                     return; // WebSocket 유지: 진행 이벤트를 계속 수신한다.
                 }
                 if (reconciliation?.terminal) {
@@ -524,11 +582,7 @@ async function startBackup() {
                 // 실행 상태로 고정하지 말고 idle UI로 복구한다.
                 if (reconciliation?.idle) {
                     setCancelButtonState(false);
-                    if (typeof enableBackupButton === 'function') {
-                        enableBackupButton();
-                    } else {
-                        document.getElementById('startBtn').disabled = false;
-                    }
+                    restoreIdleRunControls();
                     if (ws) {
                         ws.close();
                         ws = null;
@@ -550,25 +604,28 @@ async function startBackup() {
                 isRunning = true;
                 runStateRevision++;
                 setCancelButtonState(false); // 실행 ID를 몰라 이 탭에서는 취소할 수 없다.
-                document.getElementById('startBtn').disabled = true;
+                setRunStartButtonsDisabled(true);
                 document.getElementById('progressSection').style.display = 'block';
-                document.getElementById('progressText').textContent = '다른 백업 실행 중 - 상태 확인 필요';
-                addLogEntry('다른 백업이 실행 중이지만 상태를 확인하지 못했습니다. 진행 상황 수신을 기다립니다.', 'warning');
+                document.getElementById('progressText').textContent = '다른 작업 실행 중 - 상태 확인 필요';
+                addLogEntry('다른 작업이 실행 중이지만 상태를 확인하지 못했습니다. 진행 상황 수신을 기다립니다.', 'warning');
                 return; // WebSocket 유지
             }
-            throw new Error('백업 시작 실패: ' + message);
+            throw new Error(`${operationLabel} 시작 실패: ${message}`);
         }
 
         const serverObservation = observeServerInstance(runResult.serverId || null);
         if (serverObservation === 'stale') return;
         if (serverObservation === 'changed') {
-            beginTrackingRun(requestedRunId);
+            beginTrackingRun(requestedRunId, 'running', kind);
             runRequestSent = true;
         }
 
 
         if (runResult.runId && runResult.runId !== requestedRunId) {
             throw new Error('서버 실행 ID가 요청과 일치하지 않습니다.');
+        }
+        if (runResult.runKind && runResult.runKind !== kind) {
+            throw new Error('서버 실행 종류가 요청과 일치하지 않습니다.');
         }
 
         // complete/cancelled/error 이벤트가 HTTP 응답보다 먼저 도착한 경우 terminal UI를 유지한다.
@@ -611,11 +668,7 @@ async function startBackup() {
         setCancelButtonState(false);
 
         // 버튼 복구 (경로 검증 상태 반영)
-        if (typeof enableBackupButton === 'function') {
-            enableBackupButton();
-        } else {
-            document.getElementById('startBtn').disabled = false;
-        }
+        restoreIdleRunControls();
 
         // WebSocket 정리
         if (ws) {
@@ -625,12 +678,17 @@ async function startBackup() {
     }
 }
 
-// 백업 취소
+async function startVerify() {
+    return startBackup('verify');
+}
+
+// 현재 백업 또는 검증 취소
 async function cancelBackup() {
-    addLogEntry('백업 취소 버튼 클릭됨', 'warning');
+    const operationLabel = currentRunKind === 'verify' ? '검증' : '백업';
+    addLogEntry(`${operationLabel} 취소 버튼 클릭됨`, 'warning');
 
     if (!isRunning || runStartPending) {
-        addLogEntry('실행 중인 백업이 없습니다.', 'warning');
+        addLogEntry('실행 중인 작업이 없습니다.', 'warning');
         return;
     }
 
@@ -666,11 +724,7 @@ async function cancelBackup() {
                 if (runGone && !reconciliation?.active) {
                     finishTrackedRun(cancelRunId, false);
                     setCancelButtonState(false);
-                    if (typeof enableBackupButton === 'function') {
-                        enableBackupButton();
-                    } else {
-                        document.getElementById('startBtn').disabled = false;
-                    }
+                    restoreIdleRunControls();
                     await synchronizeRunStatus(null, { observe: true });
                 }
                 addLogEntry('취소 대상 실행이 일치하지 않아 서버 상태를 다시 확인했습니다.', 'warning');
@@ -722,7 +776,7 @@ async function cancelBackup() {
             addLogEntry('취소 요청은 전달되었지만 연결이 끊겨 상태를 확인합니다.', 'warning');
             await observeRunUntilTerminal(cancelRunId);
         } else {
-            addLogEntry('백업 취소 요청을 서버에 전달했습니다.', 'warning');
+            addLogEntry(`${operationLabel} 취소 요청을 서버에 전달했습니다.`, 'warning');
         }
     } catch (error) {
         if (currentRunId !== cancelRunId || (cancelRunId && terminalRunId === cancelRunId)) return;
@@ -846,6 +900,8 @@ function handleProgressUpdate(update) {
         addLogEntry(`다른 실행의 지연된 이벤트 무시: ${update.run_id}`, 'warning');
         return;
     }
+    const operationKind = update.kind || currentRunKind || 'backup';
+    const operationLabel = operationKind === 'verify' ? '검증' : '백업';
 
     if (update.type === 'complete' || update.type === 'cancelled' || update.type === 'error') {
         rememberTerminalRun(update.server_id || lastServerId, update.run_id);
@@ -893,15 +949,21 @@ function handleProgressUpdate(update) {
         progressBar.classList.remove('pulse');
         progressBar.style.width = percent + '%';
         progressPercent.textContent = percent + '%';
-        progressText.textContent = `복사 중: ${update.filename} (${update.current}/${update.total})`;
+        if (operationKind === 'verify') {
+            progressText.textContent = `검증 중: ${update.filename} (${update.current}/${update.total})`;
+            if (update.verify_verdict && update.verify_verdict !== 'ok') {
+                addFileToList(update.filename, update.verify_verdict);
+            }
+        } else {
+            progressText.textContent = `복사 중: ${update.filename} (${update.current}/${update.total})`;
+            addFileToList(update.filename, update.action);
 
-        addFileToList(update.filename, update.action);
-
-        // 에러나 특수 동작 로그
-        if (update.action === 'failed') {
-            addLogEntry(`실패: ${update.filename} - ${update.error || 'Unknown error'}`, 'error');
-        } else if (update.action === 'quarantined') {
-            addLogEntry(`격리됨: ${update.filename}`, 'warning');
+            // 에러나 특수 동작 로그
+            if (update.action === 'failed') {
+                addLogEntry(`실패: ${update.filename} - ${update.error || 'Unknown error'}`, 'error');
+            } else if (update.action === 'quarantined') {
+                addLogEntry(`격리됨: ${update.filename}`, 'warning');
+            }
         }
 
     } else if (update.type === 'complete') {
@@ -910,19 +972,17 @@ function handleProgressUpdate(update) {
         setCancelButtonState(false);
 
         // 버튼 복구
-        if (typeof enableBackupButton === 'function') {
-            enableBackupButton();
-        } else {
-            document.getElementById('startBtn').disabled = false;
-        }
+        restoreIdleRunControls();
 
         progressBar.classList.remove('pulse');
         progressBar.style.width = '100%';
         progressPercent.textContent = '100%';
         progressText.textContent = '완료!';
 
-        addLogEntry('백업 작업이 완료되었습니다.', 'success');
-        if (update.summary) {
+        addLogEntry(`${operationLabel} 작업이 완료되었습니다.`, 'success');
+        if (operationKind === 'verify' && update.verify_summary) {
+            showVerifySummary(update.verify_summary, update.run_id, update.server_id || lastServerId);
+        } else if (update.summary) {
             showSummary(update.summary);
         }
 
@@ -941,14 +1001,16 @@ function handleProgressUpdate(update) {
         setCancelButtonState(false);
 
         // 버튼 복구
-        if (typeof enableBackupButton === 'function') {
-            enableBackupButton();
-        } else {
-            document.getElementById('startBtn').disabled = false;
-        }
+        restoreIdleRunControls();
 
         const errorMessage = update.error || '알 수 없는 오류';
-        if (update.summary) {
+        if (operationKind === 'verify' && update.verify_summary) {
+            progressBar.classList.remove('pulse');
+            progressBar.style.width = '100%';
+            progressPercent.textContent = '100%';
+            progressText.textContent = '오류로 종료됨';
+            showVerifySummary(update.verify_summary, update.run_id, update.server_id || lastServerId);
+        } else if (update.summary) {
             // 부분 실패: 성공/실패 집계를 유지해 사용자가 무엇이 처리됐는지 볼 수 있게 한다.
             progressBar.classList.remove('pulse');
             progressBar.style.width = '100%';
@@ -971,17 +1033,15 @@ function handleProgressUpdate(update) {
         setCancelButtonState(false);
 
         // 버튼 복구
-        if (typeof enableBackupButton === 'function') {
-            enableBackupButton();
-        } else {
-            document.getElementById('startBtn').disabled = false;
-        }
+        restoreIdleRunControls();
 
         progressBar.classList.remove('pulse');
         progressText.textContent = update.message || '취소됨';
-        addLogEntry(update.message || '백업 작업이 취소되었습니다.', 'warning');
+        addLogEntry(update.message || `${operationLabel} 작업이 취소되었습니다.`, 'warning');
 
-        if (update.summary) {
+        if (operationKind === 'verify' && update.verify_summary) {
+            showVerifySummary(update.verify_summary, update.run_id, update.server_id || lastServerId);
+        } else if (update.summary) {
             showSummary(update.summary);
         }
 
@@ -1011,6 +1071,83 @@ async function initializeRunTracking() {
 
 window.addEventListener('DOMContentLoaded', initializeRunTracking);
 
+function shellQuote(value) {
+    return `'${String(value || '').replace(/'/g, `'\\''`)}'`;
+}
+
+function pathContains(parent, candidate) {
+    const normalizedParent = String(parent || '').replace(/\/+$/, '') || '/';
+    const normalizedCandidate = String(candidate || '').replace(/\/+$/, '') || '/';
+    return normalizedParent === '/' ||
+        normalizedCandidate === normalizedParent ||
+        normalizedCandidate.startsWith(normalizedParent + '/');
+}
+
+function updateHashManifestCommand() {
+    const command = document.getElementById('hashManifestCommand');
+    const warning = document.getElementById('hashManifestCommandWarning');
+    if (!command) return;
+
+    const dest = document.getElementById('dest')?.value?.trim() || '<도착 폴더>';
+    let output = '/tmp/shutterpipe-hashes.txt';
+    let outputExpression = shellQuote(output);
+    let outputWarning = '출력 파일은 반드시 검사 대상 폴더 밖에 두세요.';
+
+    if (pathContains(dest, output)) {
+        output = '$HOME/shutterpipe-hashes.txt';
+        outputExpression = '"$HOME/shutterpipe-hashes.txt"';
+    }
+    if (dest === '/') {
+        outputExpression = shellQuote('/Volumes/OTHER/shutterpipe-hashes.txt');
+        outputWarning = '루트 폴더 전체를 대상으로 하면 같은 파일시스템 안에 안전한 출력 위치가 없습니다. 검사 대상 밖의 다른 볼륨을 지정하세요.';
+    }
+
+    command.textContent = `find ${shellQuote(dest)} -type f -exec sha256sum {} + > ${outputExpression}`;
+    if (warning) warning.textContent = outputWarning;
+}
+
+function getVerifyMode() {
+    return document.getElementById('verifyModeHash')?.checked ? 'hash' : 'quick';
+}
+
+function updateVerifyOptions() {
+    const mode = getVerifyMode();
+    const hashOptions = document.getElementById('hashVerifyOptions');
+    const useManifest = document.getElementById('useHashManifest');
+    const manifestPanel = document.getElementById('hashManifestPanel');
+    const manifestInput = document.getElementById('hashManifest');
+    const hashMode = mode === 'hash';
+    const manifestEnabled = hashMode && !!useManifest?.checked;
+
+    if (hashOptions) hashOptions.hidden = !hashMode;
+    if (useManifest) useManifest.disabled = !hashMode;
+    if (manifestPanel) manifestPanel.hidden = !manifestEnabled;
+    if (manifestInput) manifestInput.disabled = !manifestEnabled;
+    updateHashManifestCommand();
+}
+
+async function copyHashManifestCommand() {
+    const command = document.getElementById('hashManifestCommand')?.textContent || '';
+    try {
+        await navigator.clipboard.writeText(command);
+        if (typeof showNotification === 'function') {
+            showNotification('해시 목록 생성 명령을 복사했습니다.', 'success');
+        }
+    } catch (error) {
+        alert(`명령을 복사하지 못했습니다: ${error.message}`);
+    }
+}
+
+function initializeVerifyUI() {
+    updateVerifyOptions();
+    const dest = document.getElementById('dest');
+    if (dest?.addEventListener) {
+        dest.addEventListener('input', updateHashManifestCommand);
+    }
+}
+
+window.addEventListener('DOMContentLoaded', initializeVerifyUI);
+
 // 파일 목록에 추가
 function addFileToList(filename, action) {
     const fileList = document.getElementById('fileList');
@@ -1025,7 +1162,10 @@ function addFileToList(filename, action) {
         'renamed': '[이름변경]',
         'overwritten': '[덮어쓰기]',
         'quarantined': '[격리]',
-        'failed': '[실패]'
+        'failed': '[실패]',
+        'missing': '[누락]',
+        'mismatch': '[불일치]',
+        'unverifiable': '[검증 불가]'
     };
 
     const label = actionLabels[action] || '[처리]';
@@ -1041,6 +1181,8 @@ function addFileToList(filename, action) {
 function showSummary(summary) {
     const summarySection = document.getElementById('summarySection');
     const summaryContent = document.getElementById('summaryContent');
+    const summaryTitle = document.getElementById('summaryTitle');
+    if (summaryTitle) summaryTitle.textContent = '완료 요약';
 
     const durationSeconds = Math.round(summary.Duration / 1000000000);
     const duration = formatDuration(durationSeconds);
@@ -1116,4 +1258,134 @@ function showSummary(summary) {
 			addLogEntry(`주의: ${String(warning)}`, 'warning');
 		});
 	}
+}
+
+function verifyVerdictLabel(verdict) {
+    return {
+        missing: '누락',
+        mismatch: '불일치',
+        unverifiable: '검증 불가'
+    }[verdict] || String(verdict || '문제');
+}
+
+function showVerifySummary(summary, runId, serverId) {
+    const summarySection = document.getElementById('summarySection');
+    const summaryContent = document.getElementById('summaryContent');
+    const summaryTitle = document.getElementById('summaryTitle');
+    const parseErrors = Number(summary.manifest?.parse_errors || 0);
+    const incomplete = !!summary.incomplete_manifest;
+    const modeLabel = summary.mode === 'hash' ? '정밀' : '빠른';
+    const title = incomplete
+        ? `⚠ 불완전한 목록으로 검증됨 (형식 오류 ${parseErrors}줄)`
+        : `✅ 검증 완료 — ${modeLabel} 모드${summary.manifest ? ' (해시 목록 대조)' : ''}`;
+    if (summaryTitle) summaryTitle.textContent = title;
+
+    const problemItems = Array.isArray(summary.problems)
+        ? summary.problems.map((problem) => `
+            <div class="verify-problem">
+                <div class="verify-problem-header">
+                    <span>${escapeHtml(verifyVerdictLabel(problem.verdict))}</span>
+                    <span title="${escapeHtml(problem.source_path)}">${escapeHtml(problem.name || problem.source_path)}</span>
+                </div>
+                <div class="verify-problem-reason">${escapeHtml(problem.reason)}</div>
+            </div>
+        `).join('')
+        : '';
+    const manifestInfo = summary.manifest
+        ? `
+            <div class="summary-item" data-type="${incomplete ? 'warning' : 'info'}">
+                <div class="summary-label">해시 목록</div>
+                <div class="summary-value" style="font-size: 16px;">${escapeHtml(summary.manifest.filename)}</div>
+                <div class="verify-help">${Number(summary.manifest.entries || 0)}건 · 형식 오류 ${parseErrors}줄</div>
+            </div>
+        `
+        : '';
+    const duration = formatDuration(Math.round(Number(summary.duration || 0) / 1000000000));
+    const canRequeue = !!summary.requeue_allowed && Number(summary.requeue_eligible || 0) > 0;
+    const requeueLabel = incomplete
+        ? '불완전한 해시 목록에서는 재복사 예약을 할 수 없습니다.'
+        : `문제 ${Number(summary.requeue_eligible || 0)}건, 다음 백업 때 다시 복사되게 하기`;
+
+    summaryContent.innerHTML = `
+        <div class="summary-section verify-problems">
+            <div class="summary-grid">
+                <div class="summary-item" data-type="info">
+                    <div class="summary-label">출발</div>
+                    <div class="summary-value" style="font-size: 16px;">${escapeHtml(summary.source)}</div>
+                    <div class="verify-help">${Number(summary.source_files || 0)}개 · ${formatBytes(Number(summary.source_bytes || 0))}</div>
+                </div>
+                <div class="summary-item" data-type="info">
+                    <div class="summary-label">도착</div>
+                    <div class="summary-value" style="font-size: 16px;">${escapeHtml(summary.dest)}</div>
+                    <div class="verify-help">소요 시간 ${escapeHtml(duration)}</div>
+                </div>
+                ${manifestInfo}
+                <div class="summary-item" data-type="success">
+                    <div class="summary-label">정상</div>
+                    <div class="summary-value">${Number(summary.normal || 0)}</div>
+                </div>
+                <div class="summary-item" data-type="error">
+                    <div class="summary-label">누락</div>
+                    <div class="summary-value">${Number(summary.missing || 0)}</div>
+                </div>
+                <div class="summary-item" data-type="warning">
+                    <div class="summary-label">불일치</div>
+                    <div class="summary-value">${Number(summary.mismatch || 0)}</div>
+                </div>
+                <div class="summary-item" data-type="neutral">
+                    <div class="summary-label">검증 불가</div>
+                    <div class="summary-value">${Number(summary.unverifiable || 0)}</div>
+                </div>
+            </div>
+            ${summary.manifest ? '<p class="verify-warning">결과는 목록을 생성한 시점의 도착 폴더 상태 기준입니다.</p>' : ''}
+        </div>
+        <div class="summary-section verify-problems">
+            <h3 class="summary-section-title">문제 파일 (${Number(summary.problem_count || 0)}건)</h3>
+            <div class="verify-problem-list">
+                ${problemItems || '<p class="verify-help">문제 파일이 없습니다.</p>'}
+            </div>
+            ${summary.problems_truncated ? '<p class="verify-warning">화면 표시 상한을 초과한 문제는 로그에서 확인하세요.</p>' : ''}
+        </div>
+        ${Number(summary.problem_count || 0) > 0 ? `
+            <div class="verify-requeue">
+                <button id="verifyRequeueBtn" class="btn-primary" ${canRequeue ? '' : 'disabled'}>
+                    ${escapeHtml(requeueLabel)}
+                </button>
+            </div>
+        ` : ''}
+    `;
+
+    const requeueButton = document.getElementById('verifyRequeueBtn');
+    if (requeueButton && canRequeue) {
+        requeueButton.dataset.runId = runId || '';
+        requeueButton.dataset.serverId = serverId || '';
+        requeueButton.onclick = () => requeueVerificationProblems(requeueButton);
+    }
+    summarySection.style.display = 'block';
+    addLogEntry(`검증 결과: 정상 ${Number(summary.normal || 0)}, 문제 ${Number(summary.problem_count || 0)}`, incomplete ? 'warning' : 'success');
+    if (Array.isArray(summary.warnings)) {
+        summary.warnings.forEach((warning) => addLogEntry(`주의: ${String(warning)}`, 'warning'));
+    }
+}
+
+async function requeueVerificationProblems(button) {
+    if (!button || button.disabled) return;
+    button.disabled = true;
+    const originalText = button.textContent;
+    button.textContent = '재복사 예약 중...';
+
+    const result = await requeueVerifyOnServer(button.dataset.runId, button.dataset.serverId);
+    if (result.success) {
+        button.textContent = `재복사 예약됨 ${Number(result.applied || 0)}건 (건너뜀 ${Number(result.skipped || 0)}건)`;
+        addLogEntry(button.textContent, 'success');
+        return;
+    }
+
+    button.disabled = false;
+    button.textContent = originalText;
+    const message = result.status === 409
+        ? result.error || '실행 중에는 처리할 수 없습니다. 다시 검증해 주세요.'
+        : result.error || '재복사 예약에 실패했습니다.';
+    addLogEntry(`재복사 예약 실패: ${message}`, 'error');
+    alert(message);
 }

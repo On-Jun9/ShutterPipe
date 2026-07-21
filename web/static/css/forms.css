@@ -79,6 +79,117 @@
   display: block;
 }
 
+/* ==================== 실행 모드 탭 (백업 / 검증) ==================== */
+.run-mode-header {
+  display: flex;
+  gap: 6px;
+  width: fit-content;
+  margin: 0 auto 24px;
+  padding: 6px;
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: 16px;
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.06);
+}
+
+.run-mode-header .tab-label {
+  min-width: 150px;
+  padding: 12px 40px;
+  font-size: 16px;
+  text-align: center;
+  background: transparent;
+  border-radius: 11px;
+  box-shadow: none;
+}
+
+.run-mode-header .tab-label:hover {
+  background: var(--color-bg-tertiary);
+  color: var(--color-text-primary);
+}
+
+/* 활성 탭 색은 각 실행 버튼 색과 맞춘다: 백업=초록, 검증=보라 */
+#mode-backup:checked ~ .run-mode-header label[for="mode-backup"] {
+  background: linear-gradient(135deg, var(--color-success) 0%, var(--color-success-dark) 100%);
+  color: white;
+  box-shadow: 0 4px 12px rgba(16, 185, 129, 0.3);
+}
+
+#mode-verify:checked ~ .run-mode-header label[for="mode-verify"] {
+  background: linear-gradient(135deg, var(--color-primary) 0%, var(--color-primary-dark) 100%);
+  color: white;
+  box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3);
+}
+
+/* ==================== 세그먼트 컨트롤 (비교 모드 등) ==================== */
+.segmented {
+  display: inline-flex;
+  gap: 4px;
+  padding: 5px;
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+}
+
+.seg-radio {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.seg-label {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  padding: 10px 28px;
+  color: var(--color-text-secondary);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  user-select: none;
+}
+
+.seg-title {
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.seg-sub {
+  font-size: 11px;
+  font-weight: 500;
+  opacity: 0.7;
+  line-height: 1.2;
+}
+
+.seg-label:hover {
+  background: var(--color-bg-tertiary);
+  color: var(--color-text-primary);
+}
+
+.seg-radio:checked + .seg-label {
+  background: linear-gradient(135deg, var(--color-primary) 0%, var(--color-primary-dark) 100%);
+  color: white;
+  box-shadow: 0 3px 10px rgba(99, 102, 241, 0.3);
+}
+
+/* 비활성 모드의 카드(형제) 및 버튼(형제의 하위) 숨김 */
+#mode-verify:checked ~ .backup-only,
+#mode-verify:checked ~ * .backup-only {
+  display: none !important;
+}
+
+#mode-backup:checked ~ .verify-only,
+#mode-backup:checked ~ * .verify-only {
+  display: none !important;
+}
+
+/* 실행 중에는 모드 전환 잠금 */
+.run-mode-header.locked label {
+  pointer-events: none;
+  opacity: 0.55;
+}
+
 /* ==================== Tags Input ==================== */
 .tags-container {
   display: flex;

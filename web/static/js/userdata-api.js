@@ -67,10 +67,54 @@ async function startBackupRunOnServer(config) {
             runStatus: data.status,
             runId: data.run_id,
             serverId: data.server_id,
-            revision: data.revision
+            revision: data.revision,
+            runKind: data.kind
         };
     } catch (error) {
         console.error('백업 시작 요청 실패:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+async function startVerifyRunOnServer(config, hashManifestFile = null) {
+    try {
+        const formData = new FormData();
+        formData.append('config', JSON.stringify(config));
+        if (hashManifestFile) {
+            formData.append(
+                'hash_manifest',
+                hashManifestFile,
+                hashManifestFile.name || 'hash_manifest.txt'
+            );
+        }
+
+        const response = await fetchRunApi('/api/verify', {
+            method: 'POST',
+            body: formData
+        });
+
+        if (!response.ok) {
+            const parsedError = await parseApiErrorResponse(response);
+            return {
+                success: false,
+                status: response.status,
+                field: parsedError.field,
+                error: parsedError.error
+            };
+        }
+
+        const data = await response.json();
+        return {
+            success: true,
+            status: response.status,
+            runStatus: data.status,
+            runId: data.run_id,
+            serverId: data.server_id,
+            revision: data.revision,
+            runKind: data.kind
+        };
+    } catch (error) {
+        console.error('검증 시작 요청 실패:', error);
         return { success: false, error: error.message };
     }
 }
@@ -106,10 +150,49 @@ async function cancelBackupRunOnServer(runId, serverId) {
             runStatus: data.status,
             runId: data.run_id,
             serverId: data.server_id,
-            revision: data.revision
+            revision: data.revision,
+            runKind: data.kind
         };
     } catch (error) {
         console.error('백업 취소 요청 실패:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+async function requeueVerifyOnServer(runId, serverId) {
+    if (!runId) {
+        return { success: false, status: 400, error: 'run_id is required' };
+    }
+    if (!serverId) {
+        return { success: false, status: 400, error: 'server_id is required' };
+    }
+
+    try {
+        const response = await fetchRunApi('/api/verify/requeue', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ run_id: runId, server_id: serverId })
+        });
+
+        if (!response.ok) {
+            const parsedError = await parseApiErrorResponse(response);
+            return {
+                success: false,
+                status: response.status,
+                field: parsedError.field,
+                error: parsedError.error
+            };
+        }
+
+        const data = await response.json();
+        return {
+            success: true,
+            status: response.status,
+            applied: data.applied,
+            skipped: data.skipped
+        };
+    } catch (error) {
+        console.error('재백업 등록 요청 실패:', error);
         return { success: false, error: error.message };
     }
 }
@@ -136,8 +219,10 @@ async function getBackupRunStatusFromServer(runId = null) {
             runId: data.run_id || null,
             serverId: data.server_id || null,
             summary: data.summary,
+            verifySummary: data.verify_summary,
             error: data.error,
-            revision: data.revision
+            revision: data.revision,
+            runKind: data.kind
         };
     } catch (error) {
         console.error('백업 상태 조회 실패:', error);

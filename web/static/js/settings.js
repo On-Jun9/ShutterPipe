@@ -236,28 +236,28 @@ function markPathErrors(field, errorMessage) {
 
 // Disable backup button
 function disableBackupButton() {
-    const startBtn = document.getElementById('startBtn');
-    if (startBtn) {
-        startBtn.disabled = true;
-        startBtn.title = '설정에 오류가 있습니다';
-    }
+    ['startBtn', 'verifyBtn'].forEach((id) => {
+        const button = document.getElementById(id);
+        if (!button) return;
+        button.disabled = true;
+        button.title = '설정에 오류가 있습니다';
+    });
 }
 
 // Enable backup button (only if paths are valid)
 function enableBackupButton() {
     const startBtn = document.getElementById('startBtn');
-    if (startBtn && !isRunning) {
+    const verifyBtn = document.getElementById('verifyBtn');
+    if (!isRunning) {
         // Check if both source and dest are valid before enabling
         const sourceValid = !validatePath(document.getElementById('source').value);
         const destValid = !validatePath(document.getElementById('dest').value);
 
-        if (sourceValid && destValid) {
-            startBtn.disabled = false;
-            startBtn.title = '';
-        } else {
-            startBtn.disabled = true;
-            startBtn.title = '설정에 오류가 있습니다';
-        }
+        [startBtn, verifyBtn].forEach((button) => {
+            if (!button) return;
+            button.disabled = !(sourceValid && destValid);
+            button.title = sourceValid && destValid ? '' : '설정에 오류가 있습니다';
+        });
     }
 }
 

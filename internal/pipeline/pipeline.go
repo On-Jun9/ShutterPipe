@@ -114,8 +114,12 @@ func (p *Pipeline) SetProgressCallback(cb ProgressCallback) {
 // Uses EXIF capture time if available, otherwise falls back to file modification time.
 // Compares dates only (YYYY-MM-DD), ignoring time and timezone.
 func (p *Pipeline) shouldIncludeByDate(entry types.FileEntry, meta types.MediaMetadata) bool {
+	return includesDateFilter(p.cfg, entry, meta)
+}
+
+func includesDateFilter(cfg *config.Config, entry types.FileEntry, meta types.MediaMetadata) bool {
 	// No filter configured
-	if p.cfg.DateFilterStart == "" && p.cfg.DateFilterEnd == "" {
+	if cfg.DateFilterStart == "" && cfg.DateFilterEnd == "" {
 		return true
 	}
 
@@ -131,15 +135,15 @@ func (p *Pipeline) shouldIncludeByDate(entry types.FileEntry, meta types.MediaMe
 	checkDateStr := checkDate.Format("2006-01-02")
 
 	// Check start date (inclusive)
-	if p.cfg.DateFilterStart != "" {
-		if checkDateStr < p.cfg.DateFilterStart {
+	if cfg.DateFilterStart != "" {
+		if checkDateStr < cfg.DateFilterStart {
 			return false
 		}
 	}
 
 	// Check end date (inclusive)
-	if p.cfg.DateFilterEnd != "" {
-		if checkDateStr > p.cfg.DateFilterEnd {
+	if cfg.DateFilterEnd != "" {
+		if checkDateStr > cfg.DateFilterEnd {
 			return false
 		}
 	}
@@ -199,6 +203,7 @@ func (p *Pipeline) RunWithContext(ctx context.Context) (*types.RunSummary, error
 
 		historyEntry := types.BackupHistoryEntry{
 			ID:        historyEntryID(startTime),
+			Kind:      types.RunKindBackup,
 			Summary:   *summary,
 			Config:    p.configToBackupConfig(),
 			Status:    types.BackupStatusFailed,
@@ -225,6 +230,13 @@ func (p *Pipeline) RunWithContext(ctx context.Context) (*types.RunSummary, error
 	}
 
 	var tasks []types.CopyTask
+	type pendingRebackupTask struct {
+		task    types.CopyTask
+		trusted bool
+	}
+	var pendingRebackupTasks []pendingRebackupTask
+	var standaloneRebackupTasks []types.CopyTask
+	rebackupSources := make(map[string]bool)
 	taskIndexByDest := make(map[string]int)
 	overwriteSourcesByDest := make(map[string][]types.FileEntry)
 	overwriteDirtyCountByDest := make(map[string]int)
@@ -273,7 +285,23 @@ func (p *Pipeline) RunWithContext(ctx context.Context) (*types.RunSummary, error
 				fmt.Errorf("failed to identify metadata sidecar for %s: %w", entry.Path, err),
 			)
 		}
-		stateProcessed := !p.cfg.IgnoreState && p.state.IsEntryProcessed(ctx, entry, p.cfg.HashVerify, sctx)
+		rebackupMarker, forceRebackup, markerErr := p.applicableRebackupMarker(ctx, entry, fingerprint)
+		if cause := contextTermination(ctx, markerErr); cause != nil {
+			summary.TotalFiles = filteredCount
+			summary.Unclassified = unclassifiedCount
+			return p.finishCanceledRun(summary, 0, cause)
+		}
+		if markerErr != nil {
+			filteredCount++
+			summary.Failed++
+			failedTask := types.CopyTask{
+				Source: entry, Status: types.TaskStatusFailed,
+				Action: types.CopyActionFailed, Error: markerErr.Error(),
+			}
+			p.logger.LogTask(failedTask, 0)
+			continue
+		}
+		stateProcessed := !forceRebackup && !p.cfg.IgnoreState && p.state.IsEntryProcessed(ctx, entry, p.cfg.HashVerify, sctx)
 		if stateProcessed && p.cfg.ConflictPolicy != types.ConflictPolicyOverwrite {
 			continue
 		}
@@ -295,7 +323,7 @@ func (p *Pipeline) RunWithContext(ctx context.Context) (*types.RunSummary, error
 		task.ConflictPolicy = p.cfg.ConflictPolicy
 		task.QuarantineDir = filepath.Join(p.cfg.Dest, p.cfg.QuarantineDir)
 		task.DestinationRoot = p.cfg.Dest
-		needsProcessing := !stateProcessed
+		needsProcessing := forceRebackup || !stateProcessed
 		if p.cfg.ConflictPolicy == types.ConflictPolicyOverwrite && stateProcessed {
 			_, statErr := os.Stat(task.DestPath)
 			needsProcessing = statErr != nil
@@ -306,6 +334,22 @@ func (p *Pipeline) RunWithContext(ctx context.Context) (*types.RunSummary, error
 
 		if meta.CaptureTime == nil && needsProcessing {
 			unclassifiedCount++
+		}
+
+		if forceRebackup {
+			trustedDest := rebackupMarker.DestPath != ""
+			if trustedDest {
+				task.DestPath = rebackupMarker.DestPath
+				task.DestDir = filepath.Dir(rebackupMarker.DestPath)
+				task.ConflictPolicy = types.ConflictPolicyOverwrite
+			} else {
+				task.ConflictPolicy = types.ConflictPolicyRename
+			}
+			pendingRebackupTasks = append(pendingRebackupTasks, pendingRebackupTask{
+				task: task, trusted: trustedDest,
+			})
+			rebackupSources[entry.Path] = true
+			continue
 		}
 
 		// Skip duplicate check if IgnoreState is enabled
@@ -385,10 +429,60 @@ func (p *Pipeline) RunWithContext(ctx context.Context) (*types.RunSummary, error
 		taskIndexByDest[task.DestPath] = len(tasks)
 		tasks = append(tasks, task)
 	}
+
+	for index, pending := range pendingRebackupTasks {
+		task := pending.task
+		resolution := p.conflict.ResolveWithPolicy(&task, task.ConflictPolicy)
+		if resolution.Err != nil {
+			task.Status = types.TaskStatusFailed
+			task.Action = types.CopyActionFailed
+			task.Error = resolution.Err.Error()
+			summary.Failed++
+			p.logger.LogTask(task, 0)
+			continue
+		}
+		if resolution.Skip {
+			task.Status = types.TaskStatusSkipped
+			task.Action = resolution.Action
+			summary.Skipped++
+			continue
+		}
+		task.DestPath = resolution.DestPath
+		task.Action = resolution.Action
+
+		if p.cfg.ConflictPolicy == types.ConflictPolicyOverwrite && pending.trusted {
+			overwriteSourcesByDest[task.DestPath] = append(overwriteSourcesByDest[task.DestPath], task.Source)
+			overwriteDirtyCountByDest[task.DestPath]++
+			overwriteSequenceByDest[task.DestPath] = len(entries) + index
+			if resolution.ReplaceReserved {
+				if taskIndex, ok := taskIndexByDest[task.DestPath]; ok {
+					tasks[taskIndex] = task
+					continue
+				}
+			}
+			taskIndexByDest[task.DestPath] = len(tasks)
+			tasks = append(tasks, task)
+			continue
+		}
+		if p.cfg.ConflictPolicy == types.ConflictPolicyOverwrite {
+			standaloneRebackupTasks = append(standaloneRebackupTasks, task)
+			continue
+		}
+		if resolution.ReplaceReserved {
+			if taskIndex, ok := taskIndexByDest[task.DestPath]; ok {
+				tasks[taskIndex] = task
+				summary.Skipped++
+				continue
+			}
+		}
+		taskIndexByDest[task.DestPath] = len(tasks)
+		tasks = append(tasks, task)
+	}
 	if p.cfg.ConflictPolicy == types.ConflictPolicyOverwrite {
 		tasks, overwriteSourcesByDest, overwriteDirtyCountByDest = selectDirtyOverwriteGroups(
 			ctx, tasks, overwriteSourcesByDest, overwriteDirtyCountByDest, overwriteSequenceByDest,
 		)
+		tasks = append(tasks, standaloneRebackupTasks...)
 	}
 
 	summary.TotalFiles = filteredCount
@@ -446,6 +540,8 @@ func (p *Pipeline) RunWithContext(ctx context.Context) (*types.RunSummary, error
 	overwriteWinnerByDest := make(map[string]verifiedCopyIdentity)
 
 	for result := range resultChan {
+		usesOverwriteReplay := p.cfg.ConflictPolicy == types.ConflictPolicyOverwrite &&
+			result.Task.ConflictPolicy == types.ConflictPolicyOverwrite
 		cancelled, countFailure := classifyCopyResultError(result.Error)
 		if cancelled {
 			if cancellationCause == nil {
@@ -477,14 +573,18 @@ func (p *Pipeline) RunWithContext(ctx context.Context) (*types.RunSummary, error
 		}
 
 		if result.Error != nil {
-			summary.Failed += overwriteDispositionCount(p.cfg.ConflictPolicy, overwriteDirtyCountByDest, result.Task.DestPath)
+			resultPolicy := result.Task.ConflictPolicy
+			if usesOverwriteReplay {
+				resultPolicy = types.ConflictPolicyOverwrite
+			}
+			summary.Failed += overwriteDispositionCount(resultPolicy, overwriteDirtyCountByDest, result.Task.DestPath)
 			p.logger.LogTask(result.Task, 0)
 			continue
 		}
 		if result.Warning != "" {
 			summary.Warnings = append(summary.Warnings, result.Warning)
 		}
-		if p.cfg.ConflictPolicy == types.ConflictPolicyOverwrite {
+		if usesOverwriteReplay {
 			overwriteWinnerByDest[result.Task.DestPath] = verifiedCopyIdentity{
 				sourcePath: result.Task.Source.Path,
 				hash:       append([]byte(nil), result.VerifiedSourceHash...),
@@ -494,7 +594,7 @@ func (p *Pipeline) RunWithContext(ctx context.Context) (*types.RunSummary, error
 		switch result.Task.Action {
 		case types.CopyActionCopied:
 			summary.Copied++
-			summary.Overwritten += overwriteSupersededCount(p.cfg.ConflictPolicy, overwriteDirtyCountByDest, result.Task.DestPath)
+			summary.Overwritten += overwriteSupersededCount(result.Task.ConflictPolicy, overwriteDirtyCountByDest, result.Task.DestPath)
 			bytesCopied += result.Task.Source.Size
 		case types.CopyActionSkipped:
 			summary.Skipped++
@@ -503,14 +603,14 @@ func (p *Pipeline) RunWithContext(ctx context.Context) (*types.RunSummary, error
 			bytesCopied += result.Task.Source.Size
 		case types.CopyActionOverwritten:
 			summary.Overwritten++
-			summary.Overwritten += overwriteSupersededCount(p.cfg.ConflictPolicy, overwriteDirtyCountByDest, result.Task.DestPath)
+			summary.Overwritten += overwriteSupersededCount(result.Task.ConflictPolicy, overwriteDirtyCountByDest, result.Task.DestPath)
 			bytesCopied += result.Task.Source.Size
 		case types.CopyActionQuarantined:
 			summary.Quarantined++
 			bytesCopied += result.Task.Source.Size
 		}
 
-		if !p.cfg.DryRun && result.Task.Action != types.CopyActionSkipped && p.cfg.ConflictPolicy != types.ConflictPolicyOverwrite {
+		if !p.cfg.DryRun && result.Task.Action != types.CopyActionSkipped && !usesOverwriteReplay {
 			if err := p.markProcessed(ctx, result.Task.Source, result.Task.DestPath, result.VerifiedSourceHash, p.cfg.HashVerify, false, contextBySource[result.Task.Source.Path]); err != nil {
 				// A cancelled state commit must terminate the run as cancelled, not
 				// be downgraded to a warning that lets it finish as complete.
@@ -521,6 +621,8 @@ func (p *Pipeline) RunWithContext(ctx context.Context) (*types.RunSummary, error
 				} else {
 					summary.Warnings = append(summary.Warnings, "파일 처리 상태를 기록하지 못했습니다: "+err.Error())
 				}
+			} else if rebackupSources[result.Task.Source.Path] {
+				p.state.RemoveRebackupMarker(result.Task.Source.Path)
 			}
 		}
 		p.logger.LogTask(result.Task, 0)
@@ -556,6 +658,8 @@ func (p *Pipeline) RunWithContext(ctx context.Context) (*types.RunSummary, error
 						break
 					}
 					summary.Warnings = append(summary.Warnings, "파일 처리 상태를 기록하지 못했습니다: "+err.Error())
+				} else if rebackupSources[source.Path] {
+					p.state.RemoveRebackupMarker(source.Path)
 				}
 			}
 			if cancellationCause != nil {
@@ -641,8 +745,12 @@ func stateFingerprint(cfg *config.Config) string {
 // a video's M01.XML) can move the file to a different destination, so it must be
 // part of the reprocessing decision alongside the configuration.
 func (p *Pipeline) sourceContext(ctx context.Context, fingerprint string, entry types.FileEntry) (state.SourceContext, metadata.SidecarIdentityInfo, bool, error) {
+	return sourceContextWithResolver(ctx, fingerprint, entry, p.sidecarIdentity)
+}
+
+func sourceContextWithResolver(ctx context.Context, fingerprint string, entry types.FileEntry, resolver sidecarIdentityResolver) (state.SourceContext, metadata.SidecarIdentityInfo, bool, error) {
 	sctx := state.SourceContext{ConfigFingerprint: fingerprint}
-	resolveIdentity := p.sidecarIdentity
+	resolveIdentity := resolver
 	if resolveIdentity == nil {
 		resolveIdentity = metadata.SidecarIdentity
 	}
@@ -666,8 +774,12 @@ func (p *Pipeline) sourceContext(ctx context.Context, fingerprint string, entry 
 // between hashing and parsing bind one content's identity to another content's
 // destination. Non-video entries keep the regular extractor path.
 func (p *Pipeline) extractMetadata(ctx context.Context, entry types.FileEntry, sidecar metadata.SidecarIdentityInfo, hasSidecar bool) (types.MediaMetadata, error) {
+	return extractMetadataWithExtractor(ctx, entry, sidecar, hasSidecar, p.meta)
+}
+
+func extractMetadataWithExtractor(ctx context.Context, entry types.FileEntry, sidecar metadata.SidecarIdentityInfo, hasSidecar bool, extractor metadataExtractor) (types.MediaMetadata, error) {
 	if !entry.IsVideo {
-		return p.meta.ExtractWithContext(ctx, entry)
+		return extractor.ExtractWithContext(ctx, entry)
 	}
 	if err := ctx.Err(); err != nil {
 		return types.MediaMetadata{}, err
@@ -927,6 +1039,7 @@ func (p *Pipeline) persistRunResult(summary *types.RunSummary, status types.Back
 
 	historyEntry := types.BackupHistoryEntry{
 		ID:        historyEntryID(summary.StartTime),
+		Kind:      types.RunKindBackup,
 		Summary:   *summary,
 		Config:    p.configToBackupConfig(),
 		Status:    status,
@@ -949,21 +1062,25 @@ func historyEntryID(t time.Time) string {
 
 // configToBackupConfig converts Config to BackupConfig for history entry.
 func (p *Pipeline) configToBackupConfig() types.BackupConfig {
+	return backupConfigFromConfig(p.cfg)
+}
+
+func backupConfigFromConfig(cfg *config.Config) types.BackupConfig {
 	return types.BackupConfig{
-		Source:            p.cfg.Source,
-		Dest:              p.cfg.Dest,
-		OrganizeStrategy:  p.cfg.OrganizeStrategy,
-		EventName:         p.cfg.EventName,
-		ConflictPolicy:    p.cfg.ConflictPolicy,
-		DedupMethod:       p.cfg.DedupMethod,
-		DryRun:            p.cfg.DryRun,
-		HashVerify:        p.cfg.HashVerify,
-		IgnoreState:       p.cfg.IgnoreState,
-		DateFilterStart:   p.cfg.DateFilterStart,
-		DateFilterEnd:     p.cfg.DateFilterEnd,
-		Jobs:              p.cfg.Jobs,
-		IncludeExtensions: p.cfg.IncludeExtensions,
-		UnclassifiedDir:   p.cfg.UnclassifiedDir,
-		QuarantineDir:     p.cfg.QuarantineDir,
+		Source:            cfg.Source,
+		Dest:              cfg.Dest,
+		OrganizeStrategy:  cfg.OrganizeStrategy,
+		EventName:         cfg.EventName,
+		ConflictPolicy:    cfg.ConflictPolicy,
+		DedupMethod:       cfg.DedupMethod,
+		DryRun:            cfg.DryRun,
+		HashVerify:        cfg.HashVerify,
+		IgnoreState:       cfg.IgnoreState,
+		DateFilterStart:   cfg.DateFilterStart,
+		DateFilterEnd:     cfg.DateFilterEnd,
+		Jobs:              cfg.Jobs,
+		IncludeExtensions: cfg.IncludeExtensions,
+		UnclassifiedDir:   cfg.UnclassifiedDir,
+		QuarantineDir:     cfg.QuarantineDir,
 	}
 }
