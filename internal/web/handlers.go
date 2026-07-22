@@ -126,10 +126,11 @@ type CancelRunRequest struct {
 }
 
 type StartRunResponse struct {
-	Status   string `json:"status"`
-	RunID    string `json:"run_id"`
-	ServerID string `json:"server_id"`
-	Revision uint64 `json:"revision"`
+	Status   string        `json:"status"`
+	Kind     types.RunKind `json:"kind"`
+	RunID    string        `json:"run_id"`
+	ServerID string        `json:"server_id"`
+	Revision uint64        `json:"revision"`
 }
 
 func newRunID() (string, error) {
@@ -206,7 +207,8 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(StartRunResponse{
-		Status: "started", RunID: runID, ServerID: s.instanceID(), Revision: startStatus.Revision,
+		Status: "started", Kind: types.RunKindBackup,
+		RunID: runID, ServerID: s.instanceID(), Revision: startStatus.Revision,
 	})
 
 	go func() {
@@ -216,18 +218,18 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if recovered := recover(); recovered != nil {
 				fmt.Printf("PANIC RECOVERED: %v\n", recovered)
-				terminalUpdate = pipeline.ProgressUpdate{Type: "error", RunID: runID, Error: fmt.Sprintf("Internal Server Error: %v", recovered)}
+				terminalUpdate = pipeline.ProgressUpdate{Type: "error", Kind: types.RunKindBackup, RunID: runID, Error: fmt.Sprintf("Internal Server Error: %v", recovered)}
 				terminalPending = true
 			}
 			if !terminalPending {
-				terminalUpdate = pipeline.ProgressUpdate{Type: "error", RunID: runID, Error: "backup ended without a terminal result"}
+				terminalUpdate = pipeline.ProgressUpdate{Type: "error", Kind: types.RunKindBackup, RunID: runID, Error: "backup ended without a terminal result"}
 			}
 			s.finishRun(terminalUpdate)
 		}()
 
 		p, err := pipeline.New(&cfg)
 		if err != nil {
-			terminalUpdate = pipeline.ProgressUpdate{Type: "error", RunID: runID, Error: err.Error()}
+			terminalUpdate = pipeline.ProgressUpdate{Type: "error", Kind: types.RunKindBackup, RunID: runID, Error: err.Error()}
 			terminalPending = true
 			return
 		}
@@ -241,6 +243,7 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		}()
 
 		p.SetProgressCallback(func(update pipeline.ProgressUpdate) {
+			update.Kind = types.RunKindBackup
 			update.RunID = runID
 			if isTerminalProgressType(update.Type) {
 				terminalUpdate = update
@@ -255,6 +258,7 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 			if errors.Is(err, pipeline.ErrRunCanceled) {
 				terminalUpdate = pipeline.ProgressUpdate{
 					Type:    "cancelled",
+					Kind:    types.RunKindBackup,
 					RunID:   runID,
 					Message: "백업이 취소되었습니다.",
 					Summary: summary,
@@ -263,7 +267,7 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 
-			terminalUpdate = pipeline.ProgressUpdate{Type: "error", RunID: runID, Summary: summary, Error: err.Error()}
+			terminalUpdate = pipeline.ProgressUpdate{Type: "error", Kind: types.RunKindBackup, RunID: runID, Summary: summary, Error: err.Error()}
 			terminalPending = true
 			return
 		}
@@ -271,7 +275,7 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		// Pipeline implementations normally emit complete through the callback.
 		// Keep this fallback so every successful goroutine exit records a terminal snapshot.
 		if !terminalPending {
-			terminalUpdate = pipeline.ProgressUpdate{Type: "complete", RunID: runID, Summary: summary}
+			terminalUpdate = pipeline.ProgressUpdate{Type: "complete", Kind: types.RunKindBackup, RunID: runID, Summary: summary}
 			terminalPending = true
 		}
 	}()
@@ -341,17 +345,19 @@ func (s *Server) broadcastActiveRunProgress(update pipeline.ProgressUpdate) {
 	}
 	update.Revision = status.Revision
 	update.ServerID = s.instanceID()
+	update.Kind = status.Kind
 	s.broadcastProgress(update)
 }
 
 func (s *Server) finishRun(update pipeline.ProgressUpdate) {
 	status := terminalStatusForProgress(update.Type)
-	snapshot, finished := s.runs().Finish(update.RunID, status, update.Summary, update.Error)
+	snapshot, finished := s.runs().FinishDetailed(update.RunID, status, update.Summary, update.VerifySummary, update.Error)
 	if !finished {
 		return
 	}
 	update.Revision = snapshot.Revision
 	update.ServerID = s.instanceID()
+	update.Kind = snapshot.Kind
 	s.broadcastProgress(update)
 }
 

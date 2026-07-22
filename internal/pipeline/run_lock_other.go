@@ -3,6 +3,7 @@
 package pipeline
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -22,6 +23,9 @@ func acquireRunLock(path string) (*runLock, error) {
 	}
 	lockDir := path + ".d"
 	if err := os.Mkdir(lockDir, 0700); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return nil, fmt.Errorf("lock %s: %w", lockDir, errRunLockHeld)
+		}
 		return nil, fmt.Errorf("lock %s: %w", lockDir, err)
 	}
 	return &runLock{path: lockDir}, nil

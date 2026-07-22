@@ -48,6 +48,12 @@ type Resolution struct {
 }
 
 func (c *ConflictResolver) Resolve(task *types.CopyTask) Resolution {
+	return c.ResolveWithPolicy(task, c.policy)
+}
+
+// ResolveWithPolicy applies a task-specific policy while sharing this
+// resolver's destination reservations with the rest of the run.
+func (c *ConflictResolver) ResolveWithPolicy(task *types.CopyTask, conflictPolicy types.ConflictPolicy) Resolution {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -61,7 +67,7 @@ func (c *ConflictResolver) Resolve(task *types.CopyTask) Resolution {
 		return Resolution{Action: types.CopyActionCopied, DestPath: task.DestPath}
 	}
 
-	switch c.policy {
+	switch conflictPolicy {
 	case types.ConflictPolicySkip:
 		return Resolution{Action: types.CopyActionSkipped, Skip: true}
 

@@ -151,6 +151,134 @@
   animation-delay: 0.1s;
 }
 
+.verify-options {
+  padding: 24px 32px;
+  margin-bottom: 16px;
+  border-radius: 20px;
+}
+
+.verify-options-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.verify-mode-field {
+  min-width: 240px;
+}
+
+.verify-mode-row {
+  margin-top: 20px;
+}
+
+.verify-mode-row .label-text {
+  display: block;
+  margin-bottom: 10px;
+}
+
+.verify-help,
+.verify-warning {
+  margin-top: 8px;
+  color: var(--color-text-tertiary);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.verify-warning {
+  color: #b45309;
+}
+
+.hash-verify-options {
+  margin-top: 20px;
+  padding-top: 20px;
+  border-top: 1px solid var(--color-border);
+}
+
+.verify-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+  color: var(--color-text-secondary);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.hash-manifest-panel {
+  margin-top: 16px;
+}
+
+.manifest-command-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.manifest-command-row code {
+  flex: 1;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--color-bg-secondary);
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.manifest-command-row .btn-small {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.run-actions {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 24px;
+  animation-delay: 0.2s;
+}
+
+.verify-problems {
+  grid-column: 1 / -1;
+}
+
+.verify-problem-list {
+  display: grid;
+  gap: 8px;
+  max-height: 420px;
+  overflow-y: auto;
+}
+
+.verify-problem {
+  padding: 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--color-bg-secondary);
+}
+
+.verify-problem-header {
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.verify-problem-reason {
+  margin-top: 6px;
+  color: var(--color-text-tertiary);
+  font-size: 12px;
+}
+
+.verify-requeue {
+  grid-column: 1 / -1;
+}
+
 /* Settings Sections */
 #advanced-settings > div {
   margin-bottom: 24px;
@@ -176,5 +304,16 @@
 
   .container-modern {
     padding: 20px 16px;
+  }
+
+  .verify-options-header,
+  .manifest-command-row,
+  .run-actions {
+    flex-direction: column;
+  }
+
+  .verify-mode-field,
+  .run-actions > button {
+    width: 100%;
   }
 }

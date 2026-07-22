@@ -87,6 +87,10 @@ function selectAutocompletePath(fieldId, path) {
 
     updateBookmarkButtons();
 
+    if (typeof updateHashManifestCommand === 'function') {
+        updateHashManifestCommand();
+    }
+
     if (typeof saveSettings === 'function') {
         saveSettings();
     }
@@ -217,6 +221,10 @@ function selectBookmarkPath(fieldId, path) {
     dropdown.style.display = 'none';
 
     updateBookmarkButtons();
+
+    if (typeof updateHashManifestCommand === 'function') {
+        updateHashManifestCommand();
+    }
 
     if (typeof saveSettings === 'function') {
         saveSettings();

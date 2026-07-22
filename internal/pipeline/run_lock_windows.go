@@ -3,11 +3,14 @@
 package pipeline
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"syscall"
 )
+
+const errorSharingViolation syscall.Errno = 32
 
 type runLock struct {
 	file *os.File
@@ -31,6 +34,9 @@ func acquireRunLock(path string) (*runLock, error) {
 		0,
 	)
 	if err != nil {
+		if errors.Is(err, errorSharingViolation) {
+			return nil, fmt.Errorf("lock %s: %w", path, errRunLockHeld)
+		}
 		return nil, fmt.Errorf("lock %s: %w", path, err)
 	}
 	return &runLock{file: os.NewFile(uintptr(handle), path)}, nil

@@ -608,9 +608,20 @@ test('a delayed old-server WebSocket event cannot bounce the server epoch backwa
 test('run API helpers preserve run IDs in requests and responses', async () => {
     const requests = [];
     const responses = [
-        { status: 200, body: { status: 'started', run_id: 'run-start', server_id: 'server-1', revision: 6 } },
-        { status: 200, body: { status: 'cancelling', run_id: 'run-start', server_id: 'server-1', revision: 7 } },
-        { status: 200, body: { status: 'complete', run_id: 'run-start', server_id: 'server-1', summary: { Copied: 1 }, revision: 8 } }
+        { status: 200, body: { status: 'started', kind: 'backup', run_id: 'run-start', server_id: 'server-1', revision: 6 } },
+        { status: 200, body: { status: 'cancelling', kind: 'backup', run_id: 'run-start', server_id: 'server-1', revision: 7 } },
+        {
+            status: 200,
+            body: {
+                status: 'complete',
+                kind: 'verify',
+                run_id: 'run-start',
+                server_id: 'server-1',
+                summary: { Copied: 1 },
+                verify_summary: { mode: 'quick', ok: 1 },
+                revision: 8
+            }
+        }
     ];
     const apiContext = vm.createContext({
         console,
@@ -634,19 +645,96 @@ test('run API helpers preserve run IDs in requests and responses', async () => {
     const status = await vm.runInContext(`getBackupRunStatusFromServer('run-start')`, apiContext);
 
     assert.equal(start.runId, 'run-start');
-	assert.equal(start.serverId, 'server-1');
+    assert.equal(start.serverId, 'server-1');
     assert.equal(start.revision, 6);
+    assert.equal(start.runKind, 'backup');
     assert.deepEqual(JSON.parse(requests[0].options.body), { source: '/a', run_id: 'run-start' });
     assert.equal(cancel.runId, 'run-start');
-	assert.equal(cancel.runStatus, 'cancelling');
-	assert.equal(cancel.revision, 7);
+    assert.equal(cancel.runStatus, 'cancelling');
+    assert.equal(cancel.revision, 7);
+    assert.equal(cancel.runKind, 'backup');
     assert.deepEqual(JSON.parse(requests[1].options.body), { run_id: 'run-start', server_id: 'server-1' });
     assert.equal(status.runStatus, 'complete');
     assert.equal(status.runId, 'run-start');
     assert.deepEqual(status.summary, { Copied: 1 });
+    assert.deepEqual(status.verifySummary, { mode: 'quick', ok: 1 });
     assert.equal(status.revision, 8);
-	assert.equal(status.serverId, 'server-1');
+    assert.equal(status.serverId, 'server-1');
+    assert.equal(status.runKind, 'verify');
     assert.equal(requests[2].url, '/api/run/status?run_id=run-start');
+});
+
+test('verify API helpers upload multipart data and requeue by run identity', async () => {
+    const requests = [];
+    const responses = [
+        {
+            status: 200,
+            body: {
+                status: 'started',
+                kind: 'verify',
+                run_id: 'verify-run',
+                server_id: 'server-1',
+                revision: 9
+            }
+        },
+        { status: 200, body: { applied: 2, skipped: 1 } }
+    ];
+    const apiContext = vm.createContext({
+        console,
+        document: { addEventListener() {}, readyState: 'loading' },
+        File,
+        FormData,
+        fetch: async (url, options = {}) => {
+            requests.push({ url, options });
+            const response = responses.shift();
+            return {
+                headers: { get: () => 'application/json' },
+                json: async () => response.body,
+                ok: true,
+                status: response.status,
+                text: async () => ''
+            };
+        }
+    });
+    vm.runInContext(userDataApiSource, apiContext);
+    apiContext.manifest = new File(['hash  *photo.jpg\n'], 'hashes.txt', { type: 'text/plain' });
+
+    const start = await vm.runInContext(
+        `startVerifyRunOnServer(
+            { source: '/source', dest: '/dest', verify_mode: 'hash', run_id: 'verify-run' },
+            manifest
+        )`,
+        apiContext
+    );
+    const requeue = await vm.runInContext(
+        `requeueVerifyOnServer('verify-run', 'server-1')`,
+        apiContext
+    );
+
+    assert.equal(start.runStatus, 'started');
+    assert.equal(start.runId, 'verify-run');
+    assert.equal(start.serverId, 'server-1');
+    assert.equal(start.revision, 9);
+    assert.equal(start.runKind, 'verify');
+    assert.equal(requests[0].url, '/api/verify');
+    assert.equal(requests[0].options.method, 'POST');
+    assert.equal(requests[0].options.headers, undefined);
+    assert.ok(requests[0].options.body instanceof FormData);
+    assert.deepEqual(
+        JSON.parse(requests[0].options.body.get('config')),
+        { source: '/source', dest: '/dest', verify_mode: 'hash', run_id: 'verify-run' }
+    );
+    assert.equal(requests[0].options.body.get('hash_manifest').name, 'hashes.txt');
+
+    assert.equal(requeue.success, true);
+    assert.equal(requeue.applied, 2);
+    assert.equal(requeue.skipped, 1);
+    assert.equal(requests[1].url, '/api/verify/requeue');
+    assert.equal(requests[1].options.headers['Content-Type'], 'application/json');
+    assert.deepEqual(
+        JSON.parse(requests[1].options.body),
+        { run_id: 'verify-run', server_id: 'server-1' }
+    );
 });
 
 test('cancel API helper refuses an ID-less request before fetch', async () => {
