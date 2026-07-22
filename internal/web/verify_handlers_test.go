@@ -3,6 +3,7 @@ package web
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -20,6 +21,23 @@ type multipartTestFile struct {
 	name    string
 	content string
 }
+
+type manifestTempStub struct {
+	name     string
+	writeErr error
+	closeErr error
+}
+
+func (f *manifestTempStub) Write(data []byte) (int, error) {
+	if f.writeErr != nil {
+		return 0, f.writeErr
+	}
+	return len(data), nil
+}
+
+func (f *manifestTempStub) Close() error { return f.closeErr }
+
+func (f *manifestTempStub) Name() string { return f.name }
 
 func buildVerifyMultipart(t *testing.T, configJSON *string, files []multipartTestFile) (*bytes.Buffer, string) {
 	t.Helper()
@@ -166,6 +184,42 @@ func TestHandleVerifyRejectsDuplicateAndEmptyManifest(t *testing.T) {
 			(&Server{}).handleVerify(rr, req)
 			if rr.Code != http.StatusBadRequest {
 				t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+			}
+		})
+	}
+}
+
+func TestParseVerifyUploadTreatsManifestTempFailuresAsInternalErrors(t *testing.T) {
+	configJSON := `{"verify_mode":"hash","source":"/source","dest":"/dest"}`
+	tests := []struct {
+		name     string
+		writeErr error
+		closeErr error
+	}{
+		{name: "write failure", writeErr: errors.New("disk full")},
+		{name: "close failure", closeErr: errors.New("flush failed")},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			body, contentType := buildVerifyMultipart(t, &configJSON, []multipartTestFile{{
+				field: "hash_manifest", name: "hashes.txt", content: "not-empty",
+			}})
+			req := httptest.NewRequest(http.MethodPost, "/api/verify", body)
+			req.Header.Set("Content-Type", contentType)
+			rr := httptest.NewRecorder()
+			temp := &manifestTempStub{
+				name: filepath.Join(t.TempDir(), "manifest.tmp"), writeErr: test.writeErr, closeErr: test.closeErr,
+			}
+
+			_, status, err := parseVerifyUploadWithTemp(rr, req, func() (verifyManifestTemp, error) {
+				return temp, nil
+			})
+			if err == nil {
+				t.Fatal("expected temporary manifest failure")
+			}
+			if status != http.StatusInternalServerError {
+				t.Fatalf("status=%d, want %d", status, http.StatusInternalServerError)
 			}
 		})
 	}

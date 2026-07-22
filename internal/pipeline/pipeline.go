@@ -161,7 +161,10 @@ func (p *Pipeline) RunWithContext(ctx context.Context) (*types.RunSummary, error
 	}
 	runLock, err := acquireRunLock(p.userDataManager.RunLockPath())
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrRunAlreadyActive, err)
+		if errors.Is(err, errRunLockHeld) {
+			return nil, fmt.Errorf("%w: %v", ErrRunAlreadyActive, err)
+		}
+		return nil, err
 	}
 	defer runLock.Close()
 	// New may have loaded state before another process completed its run. Reload
@@ -285,7 +288,7 @@ func (p *Pipeline) RunWithContext(ctx context.Context) (*types.RunSummary, error
 				fmt.Errorf("failed to identify metadata sidecar for %s: %w", entry.Path, err),
 			)
 		}
-		rebackupMarker, forceRebackup, markerErr := p.applicableRebackupMarker(ctx, entry, fingerprint)
+		rebackupMarker, forceRebackup, markerErr := p.applicableRebackupMarker(ctx, entry, sctx)
 		if cause := contextTermination(ctx, markerErr); cause != nil {
 			summary.TotalFiles = filteredCount
 			summary.Unclassified = unclassifiedCount
@@ -470,8 +473,31 @@ func (p *Pipeline) RunWithContext(ctx context.Context) (*types.RunSummary, error
 		}
 		if resolution.ReplaceReserved {
 			if taskIndex, ok := taskIndexByDest[task.DestPath]; ok {
+				// The trusted re-backup reclaims its historical destination, but the
+				// normal task that had reserved it must not be silently dropped.
+				// Re-resolve the displaced task under the global policy so
+				// rename/quarantine still preserves it instead of losing the file.
+				displaced := tasks[taskIndex]
 				tasks[taskIndex] = task
-				summary.Skipped++
+				displacedResolution := p.conflict.Resolve(&displaced)
+				if displacedResolution.Err != nil {
+					displaced.Status = types.TaskStatusFailed
+					displaced.Action = types.CopyActionFailed
+					displaced.Error = displacedResolution.Err.Error()
+					summary.Failed++
+					p.logger.LogTask(displaced, 0)
+					continue
+				}
+				if displacedResolution.Skip {
+					displaced.Status = types.TaskStatusSkipped
+					displaced.Action = displacedResolution.Action
+					summary.Skipped++
+					continue
+				}
+				displaced.DestPath = displacedResolution.DestPath
+				displaced.Action = displacedResolution.Action
+				taskIndexByDest[displaced.DestPath] = len(tasks)
+				tasks = append(tasks, displaced)
 				continue
 			}
 		}

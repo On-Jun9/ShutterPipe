@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/On-Jun9/ShutterPipe/internal/config"
@@ -36,7 +37,10 @@ func QueueVerificationProblems(ctx context.Context, stateFile, runID string, can
 	}
 	lock, err := acquireRunLock(manager.RunLockPath())
 	if err != nil {
-		return RequeueResult{}, fmt.Errorf("%w: %v", ErrRunAlreadyActive, err)
+		if errors.Is(err, errRunLockHeld) {
+			return RequeueResult{}, fmt.Errorf("%w: %v", ErrRunAlreadyActive, err)
+		}
+		return RequeueResult{}, err
 	}
 	defer lock.Close()
 
@@ -64,14 +68,19 @@ func QueueVerificationProblems(ctx context.Context, stateFile, runID string, can
 			continue
 		}
 		st.SetRebackupMarker(state.RebackupMarker{
-			VerificationRunID:     runID,
-			SourcePath:            candidate.Entry.Path,
-			DestPath:              trustedDestPath,
-			Verdict:               candidate.Verdict,
-			ConfigFingerprint:     candidate.SourceContext.ConfigFingerprint,
-			SourceSize:            candidate.Entry.Size,
-			SourceModTimeUnixNano: candidate.Entry.ModTime.UnixNano(),
-			SourceHash:            candidate.SourceHash,
+			VerificationRunID:      runID,
+			SourcePath:             candidate.Entry.Path,
+			DestPath:               trustedDestPath,
+			Verdict:                candidate.Verdict,
+			ConfigFingerprint:      candidate.SourceContext.ConfigFingerprint,
+			SourceSize:             candidate.Entry.Size,
+			SourceModTimeUnixNano:  candidate.Entry.ModTime.UnixNano(),
+			SourceHash:             candidate.SourceHash,
+			SidecarPresent:         candidate.SourceContext.SidecarPresent,
+			SidecarPath:            candidate.SourceContext.SidecarPath,
+			SidecarSize:            candidate.SourceContext.SidecarSize,
+			SidecarModTimeUnixNano: candidate.SourceContext.SidecarModTimeUnixNano,
+			SidecarHash:            candidate.SourceContext.SidecarHash,
 		})
 		result.Applied++
 	}

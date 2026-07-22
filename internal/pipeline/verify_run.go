@@ -101,7 +101,10 @@ func (p *VerificationPipeline) RunWithContext(ctx context.Context) (*Verificatio
 	}
 	lock, err := acquireRunLock(p.userDataManager.RunLockPath())
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrRunAlreadyActive, err)
+		if errors.Is(err, errRunLockHeld) {
+			return nil, fmt.Errorf("%w: %v", ErrRunAlreadyActive, err)
+		}
+		return nil, err
 	}
 	defer lock.Close()
 

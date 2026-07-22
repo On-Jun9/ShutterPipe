@@ -33,6 +33,24 @@ type verifyUpload struct {
 	manifestName string
 }
 
+type verifyManifestTemp interface {
+	io.WriteCloser
+	Name() string
+}
+
+type recordingWriter struct {
+	writer io.Writer
+	err    error
+}
+
+func (w *recordingWriter) Write(data []byte) (int, error) {
+	written, err := w.writer.Write(data)
+	if err != nil {
+		w.err = err
+	}
+	return written, err
+}
+
 type retainedVerification struct {
 	RunID      string
 	ServerID   string
@@ -302,6 +320,16 @@ func (s *Server) latestVerification(runID, serverID string) *retainedVerificatio
 }
 
 func parseVerifyUpload(w http.ResponseWriter, r *http.Request) (verifyUpload, int, error) {
+	return parseVerifyUploadWithTemp(w, r, func() (verifyManifestTemp, error) {
+		return os.CreateTemp("", "shutterpipe-verify-manifest-*")
+	})
+}
+
+func parseVerifyUploadWithTemp(
+	w http.ResponseWriter,
+	r *http.Request,
+	createTemp func() (verifyManifestTemp, error),
+) (verifyUpload, int, error) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxVerifyRequestBytes)
 	reader, err := r.MultipartReader()
 	if err != nil {
@@ -353,22 +381,28 @@ func parseVerifyUpload(w http.ResponseWriter, r *http.Request) (verifyUpload, in
 				return verifyUpload{}, http.StatusBadRequest, errors.New("hash_manifest file must appear at most once")
 			}
 			manifestSeen = true
-			temp, createErr := os.CreateTemp("", "shutterpipe-verify-manifest-*")
+			temp, createErr := createTemp()
 			if createErr != nil {
 				_ = part.Close()
 				cleanup()
 				return verifyUpload{}, http.StatusInternalServerError, createErr
 			}
 			upload.manifestPath = temp.Name()
-			written, copyErr := io.Copy(temp, io.LimitReader(part, maxHashManifestBytes+1))
+			manifestWriter := &recordingWriter{writer: temp}
+			written, copyErr := io.Copy(manifestWriter, io.LimitReader(part, maxHashManifestBytes+1))
 			closeErr := temp.Close()
 			_ = part.Close()
-			if copyErr == nil {
-				copyErr = closeErr
-			}
 			if copyErr != nil {
 				cleanup()
-				return verifyUpload{}, multipartErrorStatus(copyErr), copyErr
+				status := multipartErrorStatus(copyErr)
+				if manifestWriter.err != nil {
+					status = http.StatusInternalServerError
+				}
+				return verifyUpload{}, status, copyErr
+			}
+			if closeErr != nil {
+				cleanup()
+				return verifyUpload{}, http.StatusInternalServerError, closeErr
 			}
 			if written == 0 {
 				cleanup()

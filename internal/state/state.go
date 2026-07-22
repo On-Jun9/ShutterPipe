@@ -53,6 +53,16 @@ type RebackupMarker struct {
 	SourceSize            int64               `json:"source_size"`
 	SourceModTimeUnixNano int64               `json:"source_mod_time_unix_nano"`
 	SourceHash            string              `json:"source_hash,omitempty"`
+	// Sidecar* pin the classification input that produced DestPath. If the
+	// sidecar (e.g. a video's M01.XML) changes between marking and applying,
+	// the planned destination may differ from the recorded DestPath, so the
+	// marker must be discarded and the file re-classified through the normal
+	// backup flow instead of being force-overwritten to a stale destination.
+	SidecarPresent         bool   `json:"sidecar_present,omitempty"`
+	SidecarPath            string `json:"sidecar_path,omitempty"`
+	SidecarSize            int64  `json:"sidecar_size,omitempty"`
+	SidecarModTimeUnixNano int64  `json:"sidecar_mod_time_unix_nano,omitempty"`
+	SidecarHash            string `json:"sidecar_hash,omitempty"`
 }
 
 // SourceContext bundles the inputs, beyond the source file's own identity, that
