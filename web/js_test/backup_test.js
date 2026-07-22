@@ -6,7 +6,15 @@ const vm = require('node:vm');
 
 const projectRoot = path.resolve(__dirname, '..', '..');
 const coreSource = fs.readFileSync(path.join(projectRoot, 'web/static/js/core.js'), 'utf8');
-const backupSource = fs.readFileSync(path.join(projectRoot, 'web/static/js/backup.js'), 'utf8');
+// backup.js를 역할별 모듈로 분할한 뒤에도 기존 테스트가 같은 전역 함수 집합을 보도록
+// 실제 로드 순서(run-ui → run-tracking → run-results → verify → backup)로 이어 붙인다.
+const backupSource = [
+    'web/static/js/run-ui.js',
+    'web/static/js/run-tracking.js',
+    'web/static/js/run-results.js',
+    'web/static/js/verify.js',
+    'web/static/js/backup.js'
+].map((file) => fs.readFileSync(path.join(projectRoot, file), 'utf8')).join('\n');
 const userDataApiSource = fs.readFileSync(path.join(projectRoot, 'web/static/js/userdata-api.js'), 'utf8');
 
 // 각 테스트가 만든 컨텍스트를 추적해, 테스트가 남긴 durable observer(무기한 폴링
@@ -67,6 +75,58 @@ function createContext(sessionStorage = null, localStorage = null) {
     createdContexts.push(context);
     return { context, getElement };
 }
+
+test('run configuration summary and dry-run action label follow the live form values', () => {
+    const { context, getElement } = createContext();
+    getElement('source').value = '/photos/source';
+    getElement('dest').value = '/photos/dest';
+    getElement('dateFilterStart').value = '2026-01-01';
+    getElement('dateFilterEnd').value = '2026-01-31';
+    getElement('dryRun').checked = true;
+
+    vm.runInContext('updateRunConfigurationSummary(); updateRunActionLabels();', context);
+
+    assert.match(getElement('runConfigurationSummary').textContent, /\/photos\/source → \/photos\/dest/);
+    assert.match(getElement('runConfigurationSummary').textContent, /2026-01-01 ~ 2026-01-31/);
+    assert.match(getElement('runConfigurationSummary').textContent, /확장자 \d+개 · 시뮬레이션/);
+    assert.equal(getElement('startBtn').textContent, '시뮬레이션 시작');
+    assert.equal(getElement('verifyBtn').textContent, '검증 시작');
+    assert.equal(getElement('workspaceTitle').textContent, '새 백업');
+
+    getElement('mode-verify').checked = true;
+    vm.runInContext('updateRunActionLabels();', context);
+
+    assert.equal(getElement('workspaceTitle').textContent, '백업 검증');
+    assert.match(getElement('workspaceDescription').textContent, /백업 상태를 진단/);
+});
+
+test('run visual state locks the editable form while leaving the action area available', () => {
+    const { context, getElement } = createContext();
+    getElement('backupForm').inert = false;
+
+    vm.runInContext("setRunVisualState('running');", context);
+
+    assert.equal(getElement('backupForm').inert, true);
+    assert.equal(getElement('startBtn').hidden, true);
+    assert.equal(getElement('verifyBtn').hidden, true);
+    assert.equal(getElement('cancelBtn').hidden, false);
+    vm.runInContext("setRunVisualState('complete');", context);
+    assert.equal(getElement('backupForm').inert, false);
+    assert.equal(getElement('startBtn').hidden, false);
+    assert.equal(getElement('verifyBtn').hidden, false);
+    assert.equal(getElement('cancelBtn').hidden, true);
+});
+
+test('run readout and inline error use safe text-only status surfaces', () => {
+    const { context, getElement } = createContext();
+    getElement('runInlineError').id = 'runInlineError';
+
+    vm.runInContext("updateProgressReadout({ current: 3, total: 8 }); reportRunMessage('<b>network</b>', 'error');", context);
+
+    assert.equal(getElement('runReadout').textContent, 'SRC 8 · DONE 3 · 38%');
+    assert.equal(getElement('runInlineError').textContent, '<b>network</b>');
+    assert.equal(getElement('runInlineError').hidden, false);
+});
 
 test('cancel without WebSocket recovers via reconnect and status sync', async () => {
     const { context, getElement } = createContext();
@@ -277,9 +337,7 @@ test('unresolved start response loss preserves uncertain cancellable state', asy
 
 test('idle reconciliation confirms a lost start request was not accepted', async () => {
     let closeCount = 0;
-    let alertMessage = '';
     const { context, getElement } = createContext();
-    context.alert = (message) => { alertMessage = message; };
     context.startBackupRunOnServer = async () => ({ success: false, error: 'network lost' });
     context.getBackupRunStatusFromServer = async () => ({
         success: true,
@@ -298,7 +356,7 @@ test('idle reconciliation confirms a lost start request was not accepted', async
     assert.equal(vm.runInContext('isRunning', context), false);
     assert.equal(vm.runInContext('currentRunId', context), null);
     assert.equal(getElement('cancelBtn').disabled, true);
-    assert.match(alertMessage, /백업 시작 실패/);
+    assert.match(getElement('progressText').textContent, /오류: 백업 시작 실패/);
     assert.equal(closeCount, 1);
 });
 
@@ -380,7 +438,30 @@ test('terminal status snapshot restores completion after reload', async () => {
     assert.equal(vm.runInContext('isRunning', context), false);
     assert.equal(vm.runInContext('terminalRunId', context), 'completed-run');
     assert.equal(getElement('progressText').textContent, '완료!');
-    assert.equal(getElement('summarySection').style.display, 'block');
+    assert.equal(getElement('summarySection').hidden, false);
+});
+
+test('terminal reload recovery still completes when the optional progress bar is absent', async () => {
+    const { context, getElement } = createContext();
+    const originalGetElementById = context.document.getElementById;
+    context.document.getElementById = (id) => id === 'progressBar' ? null : originalGetElementById(id);
+    context.getBackupRunStatusFromServer = async () => ({
+        success: true,
+        status: 200,
+        runStatus: 'complete',
+        runId: 'completed-without-bar',
+        revision: 5,
+        summary: {
+            Duration: 0, BytesCopied: 0, BytesPerSecond: 0, ScannedFiles: 1, TotalFiles: 1,
+            Copied: 1, Skipped: 0, Renamed: 0, Overwritten: 0, Quarantined: 0, Failed: 0, Unclassified: 0
+        }
+    });
+
+    await vm.runInContext('synchronizeRunStatus()', context);
+
+    assert.equal(vm.runInContext('isRunning', context), false);
+    assert.equal(vm.runInContext('terminalRunId', context), 'completed-without-bar');
+    assert.equal(getElement('summarySection').hidden, false);
 });
 
 test('terminal status snapshot restores cancellation after reload', async () => {
@@ -401,9 +482,7 @@ test('terminal status snapshot restores cancellation after reload', async () => 
 });
 
 test('terminal status snapshot restores an error after reload', async () => {
-    let alertMessage = '';
     const { context, getElement } = createContext();
-    context.alert = (message) => { alertMessage = message; };
     context.getBackupRunStatusFromServer = async () => ({
         success: true,
         status: 200,
@@ -417,8 +496,7 @@ test('terminal status snapshot restores an error after reload', async () => {
 
     assert.equal(vm.runInContext('isRunning', context), false);
     assert.equal(vm.runInContext('terminalRunId', context), 'failed-run');
-    assert.equal(getElement('progressText').textContent, '오류 발생');
-    assert.equal(alertMessage, '오류: disk unavailable');
+    assert.equal(getElement('progressText').textContent, '오류: disk unavailable');
 });
 
 test('an observed terminal snapshot is not replayed on the next reload', async () => {
@@ -437,20 +515,15 @@ test('an observed terminal snapshot is not replayed on the next reload', async (
         error: 'old disk error'
     };
 
-    let firstAlerts = 0;
     const first = createContext(storage);
-    first.context.alert = () => { firstAlerts++; };
     first.context.getBackupRunStatusFromServer = async () => terminalStatus;
     await vm.runInContext('synchronizeRunStatus()', first.context);
 
-    let secondAlerts = 0;
     const second = createContext(storage);
-    second.context.alert = () => { secondAlerts++; };
     second.context.getBackupRunStatusFromServer = async () => terminalStatus;
     const result = await vm.runInContext('synchronizeRunStatus()', second.context);
 
-    assert.equal(firstAlerts, 1);
-    assert.equal(secondAlerts, 0);
+    assert.doesNotMatch(backupSource, /alert\s*\(/);
     assert.equal(result.observed, true);
     assert.notEqual(second.getElement('progressText').textContent, '오류 발생');
 });
@@ -913,7 +986,7 @@ test('error terminal with a summary keeps partial results visible', () => {
     } })`, context);
 
     // summary가 표시되고 처리 목록이 초기화되지 않아야 한다.
-    assert.equal(getElement('summarySection').style.display, 'block');
+    assert.equal(getElement('summarySection').hidden, false);
     assert.equal(getElement('fileList').innerHTML, '<div>[복사] a.jpg</div>');
 });
 
@@ -931,7 +1004,7 @@ test('error terminal without a summary falls back to a reset UI', () => {
     vm.runInContext(`handleProgressUpdate({ type: 'error', run_id: 'run-1', error: 'boom' })`, context);
 
     // summary가 없으면 기존처럼 목록을 초기화한다.
-    assert.equal(getElement('summarySection').style.display, 'none');
+    assert.equal(getElement('summarySection').hidden, true);
     assert.notEqual(getElement('fileList').innerHTML, '<div>[복사] a.jpg</div>');
 });
 
@@ -1107,7 +1180,7 @@ test('terminal observed in another tab is still rendered in this tab', async () 
     assert.equal(vm.runInContext('currentRunId', context), null);
     assert.equal(getElement('startBtn').disabled, false);
     assert.equal(getElement('progressText').textContent, '완료!');
-    assert.equal(getElement('summarySection').style.display, 'block');
+    assert.equal(getElement('summarySection').hidden, false);
 });
 
 test('cancel without WebSocket converges to terminal via bounded status polling', async () => {

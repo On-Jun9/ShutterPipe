@@ -4,438 +4,361 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ShutterPipe - 사진/영상 자동 백업</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <link rel="stylesheet" href="css/variables.css">
-    <link rel="stylesheet" href="css/base.css">
-    <link rel="stylesheet" href="css/layout.css">
-    <link rel="stylesheet" href="css/forms.css">
-    <link rel="stylesheet" href="css/progress.css">
-    <link rel="stylesheet" href="css/log.css">
-    <link rel="stylesheet" href="css/preset.css">
-    <link rel="stylesheet" href="css/history.css">
+    <link rel="stylesheet" href="css/variables.css?v=20260722">
+    <link rel="stylesheet" href="css/base.css?v=20260722">
+    <link rel="stylesheet" href="css/layout.css?v=20260722">
+    <link rel="stylesheet" href="css/forms.css?v=20260722">
+    <link rel="stylesheet" href="css/progress.css?v=20260722">
+    <link rel="stylesheet" href="css/log.css?v=20260722">
+    <link rel="stylesheet" href="css/preset.css?v=20260722">
+    <link rel="stylesheet" href="css/history.css?v=20260722">
+    <script src="js/theme.js?v=20260722"></script>
 </head>
 <body>
-    <!-- 프리셋 관리 버튼 (우측 상단 고정) -->
-    <button class="preset-toggle-btn" onclick="togglePresetSidebar()" title="프리셋 관리">
-        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"></path>
-            <circle cx="12" cy="12" r="3"></circle>
-        </svg>
-    </button>
+    <header class="app-bar">
+        <a class="app-brand" href="#run-workspace" aria-label="ShutterPipe 새 백업">
+            <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true"><circle cx="9" cy="9" r="7.2" fill="none" stroke="currentColor" stroke-width="1.6"/><circle cx="9" cy="9" r="2.6" class="app-brand-dot"/></svg>
+            <span class="app-brand-text">ShutterPipe</span>
+        </a>
+        <div class="app-nav">
+            <nav id="run-mode-tabs" class="run-mode-header" aria-label="작업 모드">
+                <input type="radio" name="run-mode" id="mode-backup" class="tab-radio" checked>
+                <label for="mode-backup" class="tab-label">새 백업</label>
+                <input type="radio" name="run-mode" id="mode-verify" class="tab-radio">
+                <label for="mode-verify" class="tab-label">검증</label>
+            </nav>
+            <button id="history-toggle-btn" class="history-toggle-btn tab-label app-bar-action" type="button" aria-controls="history-sidebar">이력</button>
+        </div>
+        <div class="app-bar-side">
+            <button class="app-bar-link preset-toggle backup-only" type="button" aria-controls="presetSidebar" onclick="togglePresetSidebar()">프리셋 ▾</button>
+            <button id="themeToggle" class="theme-toggle" type="button" onclick="cycleTheme()" data-mode="system" aria-label="테마 전환">
+                <svg data-icon="system" width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="8" cy="8" r="6.2" stroke="currentColor" stroke-width="1.5"/><path d="M8 1.8v12.4A6.2 6.2 0 0 0 8 1.8z" fill="currentColor"/></svg>
+                <svg data-icon="light" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="3.2"/><path d="M8 .9v1.8M8 13.3v1.8M15.1 8h-1.8M2.7 8H.9M13 3l-1.3 1.3M4.3 11.7 3 13M13 13l-1.3-1.3M4.3 4.3 3 3"/></svg>
+                <svg data-icon="dark" width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M13.5 9.6A5.9 5.9 0 0 1 6.4 2.5a6.2 6.2 0 1 0 7.1 7.1z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>
+            </button>
+        </div>
+    </header>
 
-    <!-- 백업 이력 버튼 (프리셋 버튼 아래) -->
-    <button id="history-toggle-btn" class="history-toggle-btn" title="백업 이력">
-        📋
-    </button>
+    <main id="run-workspace" class="run-workspace">
+        <header class="workspace-header">
+            <h1 id="workspaceTitle" class="workspace-title">새 백업</h1>
+            <p id="workspaceDescription" class="workspace-description">촬영일시 기준으로 사진과 영상을 안전하게 백업하고 분류합니다.</p>
+        </header>
 
-    <!-- 프리셋 사이드바 -->
-    <div id="presetSidebar" class="preset-sidebar">
+        <div class="workspace-grid">
+            <div class="workspace-flow">
+                <div id="backupForm" class="backup-workflow" aria-busy="false">
+                    <section class="form-step shared-paths" aria-labelledby="paths-title">
+                        <p class="step-kicker">01</p>
+                        <h2 id="paths-title" class="step-title">백업 경로</h2>
+                        <div class="path-fields">
+                            <div class="field-group">
+                                <label class="label-text" for="source">원본</label>
+                                <div class="path-input-group">
+                                    <div class="path-input-wrapper">
+                                        <input type="text" id="source" class="input-modern input-path" placeholder="/Volumes/SD_CARD" oninput="handlePathInput(this, 'source')" onchange="saveSettings()" autocomplete="off">
+                                        <div id="source-autocomplete" class="autocomplete-dropdown" hidden></div>
+                                    </div>
+                                    <button class="btn-bookmark" type="button" onclick="toggleBookmark('source')" title="북마크" aria-label="원본 경로 북마크">
+                                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg>
+                                    </button>
+                                    <button id="source-bookmark-btn" class="btn-bookmark" type="button" onclick="toggleBookmarkDropdown('source')" title="북마크 목록" aria-label="원본 경로 북마크 목록">
+                                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="field-group">
+                                <label class="label-text" for="dest">목적지</label>
+                                <div class="path-input-group">
+                                    <div class="path-input-wrapper">
+                                        <input type="text" id="dest" class="input-modern input-path" placeholder="/Volumes/NAS/Photos" oninput="handlePathInput(this, 'dest')" onchange="saveSettings()" autocomplete="off">
+                                        <div id="dest-autocomplete" class="autocomplete-dropdown" hidden></div>
+                                    </div>
+                                    <button class="btn-bookmark" type="button" onclick="toggleBookmark('dest')" title="북마크" aria-label="목적지 북마크">
+                                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg>
+                                    </button>
+                                    <button id="dest-bookmark-btn" class="btn-bookmark" type="button" onclick="toggleBookmarkDropdown('dest')" title="북마크 목록" aria-label="목적지 북마크 목록">
+                                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </section>
+
+                    <section class="form-step shared-targets" aria-labelledby="targets-title">
+                        <p class="step-kicker">02</p>
+                        <h2 id="targets-title" class="step-title">백업 대상</h2>
+                        <div class="field-group">
+                            <label class="label-text">날짜 필터</label>
+                            <div class="date-filter-buttons" role="group" aria-label="빠른 날짜 선택">
+                                <button class="btn-date-filter" type="button" onclick="setDateFilter('today')"><b>오늘</b><small>오늘 촬영분만</small></button>
+                                <button class="btn-date-filter" type="button" onclick="setDateFilter('week')"><b>최근 7일</b><small>일주일치</small></button>
+                                <button class="btn-date-filter" type="button" onclick="setDateFilter('month')"><b>최근 30일</b><small>한 달치</small></button>
+                                <button class="btn-date-filter active" type="button" onclick="setDateFilter('all')"><b>전체</b><small>날짜 제한 없음</small></button>
+                            </div>
+                            <div class="date-range-fields">
+                                <div class="field-group">
+                                    <label class="label-text label-compact" for="dateFilterStart">시작 날짜 (선택)</label>
+                                    <input type="date" id="dateFilterStart" class="input-modern" onchange="saveSettings(); updateDateFilterButtons();">
+                                </div>
+                                <div class="field-group">
+                                    <label class="label-text label-compact" for="dateFilterEnd">종료 날짜 (선택)</label>
+                                    <input type="date" id="dateFilterEnd" class="input-modern" onchange="saveSettings(); updateDateFilterButtons();">
+                                </div>
+                            </div>
+                        </div>
+                        <div class="field-group extension-filter-field">
+                            <div class="field-label-row">
+                                <label class="label-text" for="extensionInput">파일 확장자 <span class="help-text">쉼표 또는 스페이스로 구분</span></label>
+                                <button type="button" class="text-link" onclick="resetExtensionsToDefault()">기본값으로 초기화</button>
+                            </div>
+                            <div id="extensionTagsContainer" class="tags-container"></div>
+                            <input type="text" id="extensionInput" class="input-modern" placeholder="확장자 입력 후 Enter (예: jpg)" onkeydown="handleExtensionInput(event)">
+                        </div>
+                    </section>
+
+                    <section class="form-step backup-only" aria-labelledby="organize-title">
+                        <p class="step-kicker">03</p>
+                        <h2 id="organize-title" class="step-title">정리 방식</h2>
+                        <div class="setting-rows">
+                            <div class="setting-row">
+                                <label class="setting-key" for="organizeStrategy">분류 방식<small>목적지 폴더를 나누는 기준</small></label>
+                                <select id="organizeStrategy" class="select-modern select-compact" onchange="toggleEventNameInput(); saveSettings();">
+                                    <option value="date">날짜별 (YYYY/MM/DD)</option>
+                                    <option value="event">이벤트별 (YYYY/날짜-이벤트명/타입)</option>
+                                </select>
+                            </div>
+                            <div id="eventNameContainer" class="setting-row" hidden>
+                                <label class="setting-key" for="eventName">이벤트명 (선택)<small>날짜 폴더 뒤에 붙는 이름</small></label>
+                                <input type="text" id="eventName" class="input-modern input-compact" placeholder="예: 일상 촬영, 여행" onchange="saveSettings()">
+                            </div>
+                            <div class="setting-row">
+                                <label class="setting-key" for="conflictPolicy">이름 충돌 시<small>같은 이름의 파일이 이미 있으면</small></label>
+                                <select id="conflictPolicy" class="select-modern select-compact" onchange="saveSettings()">
+                                    <option value="skip">건너뛰기</option>
+                                    <option value="rename">이름 변경</option>
+                                    <option value="overwrite">덮어쓰기</option>
+                                    <option value="quarantine">격리</option>
+                                </select>
+                            </div>
+                            <div class="setting-row">
+                                <label class="setting-key" for="dedupMethod">중복 판별<small>이미 백업된 파일인지 확인하는 방법</small></label>
+                                <select id="dedupMethod" class="select-modern select-compact" onchange="saveSettings()">
+                                    <option value="name-size">이름 + 크기</option>
+                                    <option value="hash">해시 (느림, 정확)</option>
+                                </select>
+                            </div>
+                            <label class="setting-row setting-switch-row">
+                                <span class="setting-key">시뮬레이션<small>실제 복사 없이 결과만 미리 확인</small></span>
+                                <input type="checkbox" id="dryRun" class="switch" onchange="saveSettings()">
+                            </label>
+                            <label class="setting-row setting-switch-row">
+                                <span class="setting-key">복사 후 해시 검증<small>느리지만 더 안전하게</small></span>
+                                <input type="checkbox" id="hashVerify" class="switch" onchange="saveSettings()">
+                            </label>
+                            <label class="setting-row setting-switch-row">
+                                <span class="setting-key">이전 기록 무시<small>처음부터 전체를 다시 처리</small></span>
+                                <input type="checkbox" id="ignoreState" class="switch" onchange="saveSettings()">
+                            </label>
+                        </div>
+
+                        <button type="button" class="advanced-open" onclick="openAdvancedSettingsDialog()">고급 설정 <span class="details-summary-hint">워커 수 · 폴더명 · 상태/로그 파일</span><span class="details-summary-icon" aria-hidden="true">›</span></button>
+                    </section>
+
+                    <section class="form-step verify-options verify-only" aria-labelledby="verify-title">
+                        <p class="step-kicker">03</p>
+                        <h2 id="verify-title" class="step-title">비교 방식</h2>
+                        <p class="step-description">원본과 목적지의 실제 파일을 다시 대조합니다. 검증만으로 파일이나 상태 기록은 변경하지 않습니다.</p>
+                        <div class="segmented">
+                            <input type="radio" name="verifyMode" id="verifyModeQuick" class="seg-radio" checked onchange="updateVerifyOptions()">
+                            <label for="verifyModeQuick" class="seg-label"><span class="seg-title">빠른 비교</span><span class="seg-sub">이름 + 크기</span></label>
+                            <input type="radio" name="verifyMode" id="verifyModeHash" class="seg-radio" onchange="updateVerifyOptions()">
+                            <label for="verifyModeHash" class="seg-label"><span class="seg-title">정밀 비교</span><span class="seg-sub">SHA-256</span></label>
+                        </div>
+                        <div id="hashVerifyOptions" class="hash-verify-options" hidden>
+                            <p class="verify-warning">정밀 모드는 원본·목적지의 모든 대상 파일을 다시 읽으므로 오래 걸릴 수 있습니다.</p>
+                            <label class="setting-row setting-switch-row">
+                                <span class="setting-key">목적지 해시 목록 사용<small>미리 만든 sha256sum 목록으로 비교</small></span>
+                                <input type="checkbox" id="useHashManifest" class="switch" onchange="updateVerifyOptions()">
+                            </label>
+                            <div id="hashManifestPanel" class="hash-manifest-panel" hidden>
+                                <label class="label-text" for="hashManifest">GNU sha256sum 목록 파일 (최대 64MB)</label>
+                                <input type="file" id="hashManifest" class="input-modern" accept=".txt,text/plain">
+                                <p class="verify-help">목록을 만들 당시의 목적지 상태를 기준으로 검증합니다.</p>
+                                <div class="manifest-command-row">
+                                    <code id="hashManifestCommand"></code>
+                                    <button type="button" class="btn-small" onclick="copyHashManifestCommand()">명령 복사</button>
+                                </div>
+                                <p id="hashManifestCommandWarning" class="verify-warning"></p>
+                            </div>
+                        </div>
+                    </section>
+                </div>
+
+                <section id="progressSection" class="run-progress" aria-labelledby="progress-title" hidden>
+                    <div class="run-progress-header">
+                        <p class="step-kicker">RUNNING</p>
+                        <h2 id="progress-title" class="step-title">진행 상황</h2>
+                        <span id="accessLamp" class="run-access-lamp" aria-hidden="true"></span>
+                    </div>
+                    <div id="runReadout" class="progress-readout"></div>
+                    <div class="progress-readout-header">
+                        <span id="progressText" class="progress-text" aria-live="polite">준비 중...</span>
+                        <span id="progressPercent" class="progress-percent" aria-live="polite">0%</span>
+                    </div>
+                    <div class="progress-bar-container">
+                        <div id="progressBar" class="progress-bar" role="progressbar" aria-label="백업 진행률" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"></div>
+                    </div>
+                    <div id="fileList" class="file-list-container" aria-live="polite">
+                        <p class="file-list-placeholder">파일 처리 목록이 여기에 표시됩니다...</p>
+                    </div>
+                    <div id="runInlineError" class="run-inline-error" role="alert" aria-live="assertive" hidden></div>
+                    <div class="run-log-controls">
+                        <div class="run-log-actions">
+                            <button type="button" onclick="toggleLogViewer()" class="btn-small log-toggle"><span>상세 로그</span><span id="logToggleIcon">▼</span></button>
+                            <button type="button" onclick="copyLogToClipboard()" class="btn-small log-copy" title="로그 복사" aria-label="로그 복사">복사</button>
+                        </div>
+                        <div id="logViewer" class="log-viewer" hidden>
+                            <div id="logContent" class="log-content"></div>
+                        </div>
+                    </div>
+                </section>
+
+                <section id="summarySection" class="run-summary" aria-labelledby="summaryTitle" aria-live="polite" hidden>
+                    <h2 id="summaryTitle" class="step-title">완료 요약</h2>
+                    <div id="summaryContent" class="summary-grid"></div>
+                    <div id="runNextActions" class="run-next-actions" hidden></div>
+                </section>
+            </div>
+
+            <aside class="run-panel" aria-label="실행 제어">
+                <h3 class="run-panel-title">이 구성으로 실행</h3>
+                <div class="run-config-rows">
+                    <div class="run-config-row"><span>원본</span><b id="runRouteFrom" class="run-config-path">원본 미입력</b></div>
+                    <div class="run-config-row"><span>목적지</span><b id="runRouteTo" class="run-config-path">목적지 미입력</b></div>
+                    <div class="run-config-row"><span>날짜</span><b id="runSummaryDate">전체</b></div>
+                    <div class="run-config-row"><span>확장자</span><b id="runSummaryExt">0개</b></div>
+                    <div class="run-config-row backup-only"><span>분류</span><b id="runSummaryOrganize">날짜별</b></div>
+                    <div class="run-config-row backup-only"><span>충돌 · 중복</span><b id="runSummaryPolicy" class="run-config-quiet">건너뛰기 · 이름+크기</b></div>
+                    <div class="run-config-row verify-only"><span>비교 방식</span><b id="runSummaryVerifyMode">빠른 비교 (이름+크기)</b></div>
+                    <div class="run-config-row backup-only"><span>실행 방식</span><b id="runSummaryRunKind">실제 백업</b></div>
+                </div>
+                <p id="runConfigurationSummary" class="run-configuration-summary" hidden>원본 → 목적지 · 날짜 범위 · 확장자 선택</p>
+                <div id="runActionArea" class="run-action-buttons">
+                    <button id="startBtn" type="button" onclick="startBackup()" class="btn-primary backup-only">백업 시작</button>
+                    <button id="verifyBtn" type="button" onclick="startVerify()" class="btn-primary verify-only">검증 시작</button>
+                    <button id="cancelBtn" type="button" onclick="cancelBackup()" class="btn-danger" disabled hidden>취소</button>
+                </div>
+                <p id="runDryRunNote" class="run-panel-note" hidden><span class="run-panel-note-dot" aria-hidden="true"></span>실제 복사 없이 결과만 확인합니다</p>
+                <div class="run-panel-foot backup-only">
+                    <button type="button" class="text-link" onclick="showSavePresetDialog()">프리셋으로 저장</button>
+                    <button type="button" class="text-link" aria-controls="presetSidebar" onclick="togglePresetSidebar()">프리셋 불러오기</button>
+                </div>
+            </aside>
+        </div>
+
+        <section id="history-sidebar" class="history-view" aria-labelledby="workspaceTitle" aria-hidden="true" inert>
+            <div class="history-filters" aria-label="이력 필터">
+                <button class="history-filter-btn active" type="button" data-filter="all" onclick="setHistoryFilter('all')">전체</button>
+                <button class="history-filter-btn" type="button" data-filter="real" onclick="setHistoryFilter('real')">실제 백업</button>
+                <button class="history-filter-btn" type="button" data-filter="dry-run" onclick="setHistoryFilter('dry-run')">시뮬레이션</button>
+                <button class="history-filter-btn" type="button" data-filter="verify" onclick="setHistoryFilter('verify')">검증</button>
+            </div>
+            <div class="history-sidebar-content">
+                <div id="history-list" class="history-list">
+                    <div class="no-history">백업 이력이 없습니다</div>
+                </div>
+                <div id="history-pagination" class="history-pagination" hidden></div>
+            </div>
+        </section>
+    </main>
+
+    <div id="presetSidebar" class="preset-sidebar preset-popover" popover="auto" aria-label="프리셋 관리">
         <div class="preset-sidebar-header">
-            <h2>프리셋 관리</h2>
-            <button class="preset-close-btn" onclick="togglePresetSidebar()">&times;</button>
+            <h2>프리셋</h2>
+            <button class="preset-close-btn" type="button" onclick="togglePresetSidebar()" aria-label="프리셋 닫기">&times;</button>
         </div>
         <div class="preset-sidebar-content">
-            <!-- 프리셋 목록 -->
             <div id="presetList" class="preset-list">
                 <p class="preset-empty-message">저장된 프리셋이 없습니다</p>
             </div>
-
-            <!-- 저장 다이얼로그 -->
-            <div id="savePresetDialog" class="preset-save-dialog" style="display: none;">
-                <h3>새 프리셋 저장</h3>
-                <div class="preset-form-group">
-                    <label>프리셋 이름</label>
-                    <input type="text" id="presetName" class="input-modern" placeholder="예: 일상 촬영">
-                </div>
-                <div class="preset-form-group">
-                    <label>설명 (선택)</label>
-                    <input type="text" id="presetDescription" class="input-modern" placeholder="예: 날짜별 분류, 중복 검사">
-                </div>
-                <div class="preset-form-actions">
-                    <button onclick="savePreset()" class="btn-primary">저장</button>
-                    <button onclick="hideSavePresetDialog()" class="btn-secondary">취소</button>
-                </div>
-            </div>
-
-            <!-- 액션 버튼 -->
-            <div class="preset-actions">
-                <button onclick="showSavePresetDialog()" class="btn-action btn-save">
-                    현재 설정 저장
-                </button>
-            </div>
         </div>
     </div>
+    <div id="presetBackdrop" class="preset-backdrop" aria-hidden="true" onclick="togglePresetSidebar()"></div>
 
-    <!-- 사이드바 백드롭 -->
-    <div id="presetBackdrop" class="preset-backdrop" onclick="togglePresetSidebar()"></div>
-
-    <!-- 백업 이력 사이드바 -->
-    <div id="history-sidebar" class="history-sidebar">
-        <div class="history-sidebar-header">
-            <h2>백업 이력</h2>
-            <button id="history-close-btn" class="history-close-btn">&times;</button>
-        </div>
-        <div class="history-filters">
-            <button class="history-filter-btn active" data-filter="all" onclick="setHistoryFilter('all')">전체</button>
-            <button class="history-filter-btn" data-filter="real" onclick="setHistoryFilter('real')">실제 백업</button>
-            <button class="history-filter-btn" data-filter="dry-run" onclick="setHistoryFilter('dry-run')">시뮬레이션</button>
-            <button class="history-filter-btn" data-filter="verify" onclick="setHistoryFilter('verify')">검증</button>
-        </div>
-        <div class="history-sidebar-content">
-            <div id="history-list" class="history-list">
-                <div class="no-history">백업 이력이 없습니다</div>
+    <dialog id="savePresetDialog" class="preset-save-dialog" aria-labelledby="save-preset-title">
+        <div class="preset-dialog-content">
+            <h3 id="save-preset-title">현재 설정 저장</h3>
+            <div class="preset-form-group">
+                <label for="presetName">프리셋 이름</label>
+                <input type="text" id="presetName" class="input-modern" placeholder="예: 일상 촬영">
+            </div>
+            <div class="preset-form-group">
+                <label for="presetDescription">설명 (선택)</label>
+                <input type="text" id="presetDescription" class="input-modern" placeholder="예: 날짜별 분류, 중복 검사">
+            </div>
+            <div class="preset-form-actions">
+                <button type="button" onclick="savePreset()" class="btn-primary">저장</button>
+                <button type="button" onclick="hideSavePresetDialog()" class="btn-secondary">취소</button>
             </div>
         </div>
-    </div>
+    </dialog>
 
-    <!-- 백업 이력 백드롭 -->
-    <div id="history-backdrop" class="history-backdrop"></div>
-
-    <div class="container-modern">
-        <header class="fade-in" style="text-align: center; margin-bottom: 48px;">
-            <h1 class="header-title">📸 ShutterPipe</h1>
-            <p style="color: #475569; font-size: 18px; margin-top: 12px; font-weight: 500;">촬영일시 기준 사진/영상 자동 백업 및 분류</p>
-        </header>
-
-        <div class="glass-card fade-in" style="padding: 32px; margin-bottom: 24px; border-radius: 20px;">
-            <h2 class="section-title" style="margin-bottom: 24px;">경로 설정</h2>
-
-            <div style="margin-bottom: 20px;">
-                <label class="label-text">원본 경로 (SD 카드)</label>
-                <div class="path-input-group">
-                    <div class="path-input-wrapper">
-                        <input type="text" id="source" class="input-modern"
-                               placeholder="/Volumes/SD_CARD"
-                               oninput="handlePathInput(this, 'source')"
-                               onchange="saveSettings()"
-                               autocomplete="off">
-                        <div id="source-autocomplete" class="autocomplete-dropdown" style="display: none;"></div>
-                    </div>
-                    <button class="btn-bookmark" onclick="toggleBookmark('source')" title="북마크">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                            <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon>
-                        </svg>
-                    </button>
-                    <button id="source-bookmark-btn" class="btn-bookmark" onclick="toggleBookmarkDropdown('source')" title="북마크 목록">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
-                        </svg>
-                    </button>
-                </div>
-            </div>
-
-            <div>
-                <label class="label-text">목적지 (NAS)</label>
-                <div class="path-input-group">
-                    <div class="path-input-wrapper">
-                        <input type="text" id="dest" class="input-modern"
-                               placeholder="/Volumes/NAS/Photos"
-                               oninput="handlePathInput(this, 'dest')"
-                               onchange="saveSettings()"
-                               autocomplete="off">
-                        <div id="dest-autocomplete" class="autocomplete-dropdown" style="display: none;"></div>
-                    </div>
-                    <button class="btn-bookmark" onclick="toggleBookmark('dest')" title="북마크">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                            <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon>
-                        </svg>
-                    </button>
-                    <button id="dest-bookmark-btn" class="btn-bookmark" onclick="toggleBookmarkDropdown('dest')" title="북마크 목록">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
-                        </svg>
-                    </button>
-                </div>
-            </div>
+    <dialog id="advancedSettingsDialog" class="advanced-dialog" aria-labelledby="advanced-dialog-title">
+        <div class="advanced-dialog-header">
+            <h3 id="advanced-dialog-title">고급 설정</h3>
+            <p class="advanced-dialog-hint">워커 수 · 폴더명 · 상태/로그 파일</p>
         </div>
-
-        <!-- 대상 필터 (백업·검증 공통) -->
-        <div class="glass-card fade-in" style="padding: 32px; margin-bottom: 24px; border-radius: 20px;">
-            <h2 class="section-title" style="margin-bottom: 24px;">대상 필터</h2>
-
-            <!-- 날짜 필터 -->
-            <div style="margin-bottom: 24px;">
-                <label class="label-text">날짜 필터</label>
-                <div style="display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap;">
-                    <button class="btn-date-filter" onclick="setDateFilter('today')">오늘</button>
-                    <button class="btn-date-filter" onclick="setDateFilter('week')">최근 7일</button>
-                    <button class="btn-date-filter" onclick="setDateFilter('month')">최근 30일</button>
-                    <button class="btn-date-filter active" onclick="setDateFilter('all')">전체</button>
-                </div>
-                <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px;">
-                    <div>
-                        <label class="label-text" style="font-size: 13px; margin-bottom: 4px;">시작 날짜 (선택)</label>
-                        <input type="date" id="dateFilterStart" class="input-modern" onchange="saveSettings(); updateDateFilterButtons();">
-                    </div>
-                    <div>
-                        <label class="label-text" style="font-size: 13px; margin-bottom: 4px;">종료 날짜 (선택)</label>
-                        <input type="date" id="dateFilterEnd" class="input-modern" onchange="saveSettings(); updateDateFilterButtons();">
-                    </div>
-                </div>
-            </div>
-
-            <!-- 포함할 파일 확장자 -->
-            <div>
-                <label class="label-text">
-                    포함할 파일 확장자
-                    <span class="help-text">쉼표 또는 스페이스로 구분 (예: jpg, png, mp4)</span>
-                </label>
-                <div id="extensionTagsContainer" class="tags-container"></div>
-                <input type="text" id="extensionInput" class="input-modern"
-                       placeholder="확장자 입력 후 Enter (예: jpg)"
-                       onkeydown="handleExtensionInput(event)">
-            </div>
+        <div id="advancedDialogSlot" class="advanced-dialog-body">
+            <div id="advancedSettingsContent" class="advanced-settings-content">
+                                <div class="setting-rows">
+                                    <div class="setting-row">
+                                        <label class="setting-key" for="jobs">병렬 워커 수<small>0=자동, 1-32=수동 지정</small></label>
+                                        <input type="number" id="jobs" class="input-modern input-compact" min="0" max="32" value="0" placeholder="0 (자동)" onchange="saveSettings()">
+                                    </div>
+                                    <div class="setting-row">
+                                        <label class="setting-key" for="unclassifiedDir">분류 불가 폴더명<small>메타데이터가 없는 파일이 저장되는 폴더</small></label>
+                                        <input type="text" id="unclassifiedDir" class="input-modern input-compact" placeholder="unclassified" onchange="saveSettings()">
+                                    </div>
+                                    <div class="setting-row">
+                                        <label class="setting-key" for="quarantineDir">격리 폴더명<small>격리 정책 선택 시 사용</small></label>
+                                        <input type="text" id="quarantineDir" class="input-modern input-compact" placeholder="quarantine" onchange="saveSettings()">
+                                    </div>
+                                    <div class="setting-row">
+                                        <label class="setting-key" for="stateFile">상태 파일 경로<small>기본: ~/.shutterpipe/state.json</small></label>
+                                        <input type="text" id="stateFile" class="input-modern input-compact input-path" placeholder="~/.shutterpipe/state.json" oninput="cleanPath(this)" onchange="saveSettings()">
+                                    </div>
+                                    <div class="setting-row">
+                                        <label class="setting-key" for="logFile">로그 파일 경로<small>기본: ~/.shutterpipe/shutterpipe.log</small></label>
+                                        <input type="text" id="logFile" class="input-modern input-compact input-path" placeholder="~/.shutterpipe/shutterpipe.log" oninput="cleanPath(this)" onchange="saveSettings()">
+                                    </div>
+                                    <label class="setting-row setting-switch-row">
+                                        <span class="setting-key">JSON 형식 로그<small>로그를 JSON 형식으로 저장</small></span>
+                                        <input type="checkbox" id="logJson" class="switch" onchange="saveSettings()">
+                                    </label>
+                                </div>
+                        </div>
         </div>
-
-        <!-- 실행 모드 탭 (백업 / 검증) -->
-        <input type="radio" name="run-mode" id="mode-backup" class="tab-radio" checked>
-        <input type="radio" name="run-mode" id="mode-verify" class="tab-radio">
-        <div id="run-mode-tabs" class="run-mode-header">
-            <label for="mode-backup" class="tab-label">백업</label>
-            <label for="mode-verify" class="tab-label">검증</label>
+        <div class="advanced-dialog-foot">
+            <button type="button" class="btn-secondary" onclick="document.getElementById('advancedSettingsDialog').close()">닫기</button>
         </div>
+    </dialog>
 
-        <div class="glass-card fade-in settings-container backup-only">
-            <h2 class="section-title" style="margin-bottom: 24px;">백업 설정</h2>
+    <div id="source-bookmarks" class="bookmark-dropdown" hidden></div>
+    <div id="dest-bookmarks" class="bookmark-dropdown" hidden></div>
 
-            <!-- 탭 라디오 버튼 (숨김) -->
-            <input type="radio" name="settings-tab" id="tab-basic" class="tab-radio" checked>
-            <input type="radio" name="settings-tab" id="tab-advanced" class="tab-radio">
-
-            <!-- 탭 헤더 -->
-            <div class="tab-header">
-                <label for="tab-basic" class="tab-label">기본 설정</label>
-                <label for="tab-advanced" class="tab-label">고급 설정</label>
-            </div>
-
-            <!-- 기본 설정 탭 -->
-            <div id="basic-settings" class="tab-content">
-                <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px; margin-bottom: 20px;">
-                    <div>
-                        <label class="label-text">분류 방식</label>
-                        <select id="organizeStrategy" class="select-modern" onchange="toggleEventNameInput(); saveSettings();">
-                            <option value="date">날짜별 (YYYY/MM/DD)</option>
-                            <option value="event">이벤트별 (YYYY/날짜-이벤트명/파일타입)</option>
-                        </select>
-                    </div>
-
-                    <div id="eventNameContainer" style="display: none;">
-                        <label class="label-text">이벤트명 (선택)</label>
-                        <input type="text" id="eventName" class="input-modern"
-                               placeholder="예: 일상 촬영, 여행, 행사" onchange="saveSettings()">
-                    </div>
-
-                    <div>
-                        <label class="label-text">충돌 정책</label>
-                        <select id="conflictPolicy" class="select-modern" onchange="saveSettings()">
-                            <option value="skip">Skip (건너뛰기)</option>
-                            <option value="rename">Rename (이름 변경)</option>
-                            <option value="overwrite">Overwrite (덮어쓰기)</option>
-                            <option value="quarantine">Quarantine (격리)</option>
-                        </select>
-                    </div>
-
-                    <div>
-                        <label class="label-text">중복 검사 방법</label>
-                        <select id="dedupMethod" class="select-modern" onchange="saveSettings()">
-                            <option value="name-size">이름 + 크기</option>
-                            <option value="hash">해시 (느림, 정확)</option>
-                        </select>
-                    </div>
-                </div>
-
-                <div style="display: flex; gap: 24px; flex-wrap: wrap;">
-                    <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
-                        <input type="checkbox" id="dryRun" class="checkbox-modern" onchange="saveSettings()">
-                        <span style="font-size: 15px; color: var(--color-text-secondary); font-weight: 500;">Dry Run (시뮬레이션)</span>
-                    </label>
-                    <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
-                        <input type="checkbox" id="hashVerify" class="checkbox-modern" onchange="saveSettings()">
-                        <span style="font-size: 15px; color: var(--color-text-secondary); font-weight: 500;">해시 검증</span>
-                    </label>
-                    <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
-                        <input type="checkbox" id="ignoreState" class="checkbox-modern" onchange="saveSettings()">
-                        <span style="font-size: 15px; color: var(--color-text-secondary); font-weight: 500;">이전 기록 무시 (전체 다시 수행)</span>
-                    </label>
-                </div>
-            </div>
-
-            <!-- 고급 설정 탭 -->
-            <div id="advanced-settings" class="tab-content">
-                <!-- Jobs (병렬 워커 수) -->
-                <div>
-                    <label class="label-text">
-                        병렬 워커 수 (Jobs)
-                        <span class="help-text">동시 처리 파일 개수 (0=자동, 1-32=수동 지정)</span>
-                    </label>
-                    <input type="number" id="jobs" class="input-modern"
-                           min="0" max="32" value="0"
-                           placeholder="0 (자동 설정)"
-                           onchange="saveSettings()">
-                </div>
-
-                <!-- Custom Folders -->
-                <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px;">
-                    <div>
-                        <label class="label-text">
-                            분류 불가 폴더명
-                            <span class="help-text">메타데이터가 없는 파일이 저장되는 폴더</span>
-                        </label>
-                        <input type="text" id="unclassifiedDir" class="input-modern"
-                               placeholder="unclassified"
-                               onchange="saveSettings()">
-                    </div>
-                    <div>
-                        <label class="label-text">
-                            격리 폴더명
-                            <span class="help-text">충돌 시 격리 정책 선택 시 사용되는 폴더</span>
-                        </label>
-                        <input type="text" id="quarantineDir" class="input-modern"
-                               placeholder="quarantine"
-                               onchange="saveSettings()">
-                    </div>
-                </div>
-
-                <!-- Logging Options -->
-                <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px;">
-                    <div>
-                        <label class="label-text">
-                            상태 파일 경로 (선택)
-                            <span class="help-text">비워두면 기본: ~/.shutterpipe/state.json</span>
-                        </label>
-                        <input type="text" id="stateFile" class="input-modern"
-                               placeholder="~/.shutterpipe/state.json"
-                               oninput="cleanPath(this)"
-                               onchange="saveSettings()">
-                    </div>
-                    <div>
-                        <label class="label-text">
-                            로그 파일 경로 (선택)
-                            <span class="help-text">비워두면 기본: ~/.shutterpipe/shutterpipe.log</span>
-                        </label>
-                        <input type="text" id="logFile" class="input-modern"
-                               placeholder="~/.shutterpipe/shutterpipe.log"
-                               oninput="cleanPath(this)"
-                               onchange="saveSettings()">
-                    </div>
-                </div>
-
-                <div>
-                    <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
-                        <input type="checkbox" id="logJson" class="checkbox-modern" onchange="saveSettings()">
-                        <span style="font-size: 15px; color: var(--color-text-secondary); font-weight: 500;">
-                            JSON 형식 로그
-                            <span class="help-text">로그를 JSON 형식으로 저장 (파싱 용이)</span>
-                        </span>
-                    </label>
-                </div>
-            </div>
-        </div>
-
-        <div class="glass-card fade-in verify-options verify-only">
-            <div class="verify-options-header">
-                <div>
-                    <h2 class="section-title">백업 검증</h2>
-                    <p class="verify-help">출발과 도착의 실제 파일을 다시 대조합니다. 검증만으로는 파일이나 상태 기록을 변경하지 않습니다.</p>
-                </div>
-            </div>
-
-            <div class="verify-mode-row">
-                <span class="label-text">비교 모드</span>
-                <div class="segmented">
-                    <input type="radio" name="verifyMode" id="verifyModeQuick" class="seg-radio" checked onchange="updateVerifyOptions()">
-                    <label for="verifyModeQuick" class="seg-label">
-                        <span class="seg-title">빠른 비교</span>
-                        <span class="seg-sub">이름 + 크기</span>
-                    </label>
-                    <input type="radio" name="verifyMode" id="verifyModeHash" class="seg-radio" onchange="updateVerifyOptions()">
-                    <label for="verifyModeHash" class="seg-label">
-                        <span class="seg-title">정밀 비교</span>
-                        <span class="seg-sub">SHA-256</span>
-                    </label>
-                </div>
-            </div>
-
-            <div id="hashVerifyOptions" class="hash-verify-options" hidden>
-                <p class="verify-warning">정밀 모드는 출발·도착의 모든 대상 파일을 다시 읽으므로 오래 걸릴 수 있습니다.</p>
-                <label class="verify-checkbox">
-                    <input type="checkbox" id="useHashManifest" class="checkbox-modern" onchange="updateVerifyOptions()">
-                    <span>도착 폴더 해시 목록 사용</span>
-                </label>
-                <div id="hashManifestPanel" class="hash-manifest-panel" hidden>
-                    <label class="label-text" for="hashManifest">GNU sha256sum 목록 파일 (최대 64MB)</label>
-                    <input type="file" id="hashManifest" class="input-modern" accept=".txt,text/plain">
-                    <p class="verify-help">목록을 만들 당시의 도착 폴더 상태를 기준으로 검증합니다.</p>
-                    <div class="manifest-command-row">
-                        <code id="hashManifestCommand"></code>
-                        <button type="button" class="btn-small" onclick="copyHashManifestCommand()">명령 복사</button>
-                    </div>
-                    <p id="hashManifestCommandWarning" class="verify-warning"></p>
-                </div>
-            </div>
-        </div>
-
-        <div class="run-actions fade-in">
-            <button id="startBtn" onclick="startBackup()" class="btn-success backup-only" style="flex: 1;">
-                백업 시작
-            </button>
-            <button id="verifyBtn" onclick="startVerify()" class="btn-primary verify-only" style="flex: 1;">
-                검증
-            </button>
-            <button id="cancelBtn" onclick="cancelBackup()" class="btn-danger" style="min-width: 120px;" disabled>
-                취소
-            </button>
-        </div>
-
-        <div id="progressSection" class="glass-card fade-in" style="padding: 32px; border-radius: 20px; display: none;">
-            <h2 class="section-title" style="margin-bottom: 24px;">진행 상황</h2>
-            
-            <div style="margin-bottom: 24px;">
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
-                    <span id="progressText" class="progress-text">준비 중...</span>
-                    <span id="progressPercent" class="progress-percent">0%</span>
-                </div>
-                <div class="progress-bar-container">
-                    <div id="progressBar" class="progress-bar" style="width: 0%"></div>
-                </div>
-            </div>
-
-            <div id="fileList" class="file-list-container" style="padding: 16px;">
-                <p style="font-size: 14px; color: var(--color-text-tertiary); text-align: center;">파일 처리 목록이 여기에 표시됩니다...</p>
-            </div>
-
-            <div style="margin-top: 16px;">
-                <div style="display: flex; gap: 8px;">
-                    <button onclick="toggleLogViewer()" class="btn-small" style="flex: 1; display: flex; justify-content: space-between; align-items: center;">
-                        <span>📜 상세 로그</span>
-                        <span id="logToggleIcon">▼</span>
-                    </button>
-                    <button onclick="copyLogToClipboard()" class="btn-small" style="width: auto;" title="로그 복사">
-                        📋
-                    </button>
-                </div>
-                <div id="logViewer" class="log-viewer" style="display: none;">
-                    <div id="logContent" class="log-content"></div>
-                </div>
-            </div>
-        </div>
-
-        <div id="summarySection" class="glass-card fade-in" style="padding: 32px; border-radius: 20px; margin-top: 24px; display: none;">
-            <h2 id="summaryTitle" class="section-title" style="margin-bottom: 24px;">완료 요약</h2>
-            <div id="summaryContent" class="summary-grid"></div>
-        </div>
-    </div>
-
-    <!-- Bookmark Dropdowns (body level for proper z-index) -->
-    <div id="source-bookmarks" class="bookmark-dropdown" style="display: none;"></div>
-    <div id="dest-bookmarks" class="bookmark-dropdown" style="display: none;"></div>
-
-    <script src="js/core.js"></script>
-    <script src="js/log.js"></script>
-    <script src="js/extensions.js"></script>
-    <script src="js/userdata-api.js"></script>
-    <script src="js/settings.js"></script>
-    <script src="js/path-autocomplete.js"></script>
-    <script src="js/backup.js"></script>
-    <script src="js/preset.js"></script>
-    <script src="js/history.js"></script>
+    <script src="js/core.js?v=20260722"></script>
+    <script src="js/log.js?v=20260722"></script>
+    <script src="js/extensions.js?v=20260722"></script>
+    <script src="js/userdata-api.js?v=20260722"></script>
+    <script src="js/settings.js?v=20260722"></script>
+    <script src="js/path-autocomplete.js?v=20260722"></script>
+    <script src="js/run-ui.js?v=20260722"></script>
+    <script src="js/run-tracking.js?v=20260722"></script>
+    <script src="js/run-results.js?v=20260722"></script>
+    <script src="js/verify.js?v=20260722"></script>
+    <script src="js/backup.js?v=20260722"></script>
+    <script src="js/preset.js?v=20260722"></script>
+    <script src="js/history.js?v=20260722"></script>
+</body>
+</html>

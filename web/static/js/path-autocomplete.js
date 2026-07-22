@@ -42,7 +42,7 @@ function showAutocomplete(input, fieldId) {
     const dropdown = document.getElementById(`${fieldId}-autocomplete`);
 
     if (!value) {
-        dropdown.style.display = 'none';
+        dropdown.hidden = true;
         autocompleteState.currentField = null;
         return;
     }
@@ -53,7 +53,7 @@ function showAutocomplete(input, fieldId) {
     );
 
     if (matches.length === 0) {
-        dropdown.style.display = 'none';
+        dropdown.hidden = true;
         autocompleteState.currentField = null;
         return;
     }
@@ -69,7 +69,7 @@ function showAutocomplete(input, fieldId) {
         dropdown.appendChild(item);
     });
 
-    dropdown.style.display = 'block';
+    dropdown.hidden = false;
     autocompleteState.currentField = fieldId;
     autocompleteState.selectedIndex = -1;
 }
@@ -80,7 +80,7 @@ function selectAutocompletePath(fieldId, path) {
     input.value = path;
 
     const dropdown = document.getElementById(`${fieldId}-autocomplete`);
-    dropdown.style.display = 'none';
+    dropdown.hidden = true;
 
     autocompleteState.currentField = null;
     autocompleteState.selectedIndex = -1;
@@ -148,12 +148,12 @@ function toggleBookmarkDropdown(fieldId) {
     // 다른 드롭다운 닫기
     document.querySelectorAll('.bookmark-dropdown').forEach(d => {
         if (d.id !== `${fieldId}-bookmarks`) {
-            d.style.display = 'none';
+            d.hidden = true;
         }
     });
 
-    if (dropdown.style.display === 'block') {
-        dropdown.style.display = 'none';
+    if (!dropdown.hidden) {
+        dropdown.hidden = true;
         return;
     }
 
@@ -166,7 +166,7 @@ function toggleBookmarkDropdown(fieldId) {
 
     // 북마크 목록 렌더링
     renderBookmarkDropdown(fieldId);
-    dropdown.style.display = 'block';
+    dropdown.hidden = false;
 }
 
 // 북마크 드롭다운 렌더링
@@ -218,7 +218,7 @@ function selectBookmarkPath(fieldId, path) {
     input.value = path;
 
     const dropdown = document.getElementById(`${fieldId}-bookmarks`);
-    dropdown.style.display = 'none';
+    dropdown.hidden = true;
 
     updateBookmarkButtons();
 
@@ -277,7 +277,7 @@ document.addEventListener('keydown', (e) => {
     if (!autocompleteState.currentField) return;
 
     const dropdown = document.getElementById(`${autocompleteState.currentField}-autocomplete`);
-    if (dropdown.style.display === 'none') return;
+    if (dropdown.hidden) return;
 
     const items = dropdown.querySelectorAll('.autocomplete-item');
     if (items.length === 0) return;
@@ -297,7 +297,7 @@ document.addEventListener('keydown', (e) => {
             items[autocompleteState.selectedIndex].click();
         }
     } else if (e.key === 'Escape') {
-        dropdown.style.display = 'none';
+        dropdown.hidden = true;
         autocompleteState.currentField = null;
         autocompleteState.selectedIndex = -1;
     }
@@ -320,7 +320,7 @@ document.addEventListener('click', (e) => {
     // 자동완성 드롭다운 닫기
     if (!e.target.closest('.path-input-wrapper')) {
         document.querySelectorAll('.autocomplete-dropdown').forEach(d => {
-            d.style.display = 'none';
+            d.hidden = true;
         });
         autocompleteState.currentField = null;
         autocompleteState.selectedIndex = -1;
@@ -329,7 +329,7 @@ document.addEventListener('click', (e) => {
     // 북마크 드롭다운 닫기
     if (!e.target.closest('.btn-bookmark') && !e.target.closest('.bookmark-dropdown')) {
         document.querySelectorAll('.bookmark-dropdown').forEach(d => {
-            d.style.display = 'none';
+            d.hidden = true;
         });
     }
 });

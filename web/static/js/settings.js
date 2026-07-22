@@ -266,11 +266,7 @@ function toggleEventNameInput() {
     const strategy = document.getElementById('organizeStrategy').value;
     const eventNameContainer = document.getElementById('eventNameContainer');
 
-    if (strategy === 'event') {
-        eventNameContainer.style.display = 'block';
-    } else {
-        eventNameContainer.style.display = 'none';
-    }
+    eventNameContainer.hidden = strategy !== 'event';
 }
 
 // 날짜 필터 설정 (빠른 선택)
@@ -358,3 +354,9 @@ window.addEventListener('DOMContentLoaded', () => {
         destInput.addEventListener('blur', () => validateField('dest'));
     }
 });
+
+// 고급 설정 모달
+function openAdvancedSettingsDialog() {
+    const dialog = document.getElementById('advancedSettingsDialog');
+    if (dialog && typeof dialog.showModal === 'function') dialog.showModal();
+}
