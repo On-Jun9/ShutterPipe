@@ -58,6 +58,16 @@ function removeExtension(ext) {
     }
 }
 
+// 확장자 목록을 기본값으로 초기화
+function resetExtensionsToDefault() {
+    includeExtensions = [...DEFAULT_INCLUDE_EXTENSIONS];
+    renderExtensionTags();
+
+    if (typeof saveSettings === 'function') {
+        saveSettings();
+    }
+}
+
 // 확장자 입력 핸들러 (Enter 키)
 function handleExtensionInput(event) {
     if (event.key === 'Enter') {

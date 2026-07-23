@@ -22,10 +22,11 @@ let lastServerId = null;  // revision을 발행한 서버 프로세스 ID
 let retiredServerIds = new Set();  // 새 서버 확인 뒤 지연 도착한 이전 서버 이벤트 차단
 
 // 확장자 목록
-let includeExtensions = [
+const DEFAULT_INCLUDE_EXTENSIONS = [
     'jpg', 'jpeg', 'heic', 'heif', 'png', 'raw', 'arw', 'cr2', 'nef', 'dng',
     'mp4', 'mov', 'avi', 'mkv', 'mxf', 'xml'
 ];
+let includeExtensions = [...DEFAULT_INCLUDE_EXTENSIONS];
 
 // 경로 히스토리 (최대 10개)
 let pathHistory = {

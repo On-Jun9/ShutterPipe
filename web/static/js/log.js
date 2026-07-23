@@ -30,11 +30,11 @@ function toggleLogViewer() {
     const viewer = document.getElementById('logViewer');
     const icon = document.getElementById('logToggleIcon');
 
-    if (viewer.style.display === 'none') {
-        viewer.style.display = 'block';
+    if (viewer.hidden) {
+        viewer.hidden = false;
         icon.textContent = '▲';
     } else {
-        viewer.style.display = 'none';
+        viewer.hidden = true;
         icon.textContent = '▼';
     }
 }
