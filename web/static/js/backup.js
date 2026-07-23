@@ -472,7 +472,13 @@ function handleWebSocketClose(event, backupMayStillBeRunning, cancelInProgress) 
         addLogEntry('서버와의 연결이 끊겼습니다. 백업 상태를 확인할 수 없습니다.', 'error');
         // 정상 실행 중 연결이 끊기면 terminal 이벤트를 받을 경로가 없다. 관찰자를 시작해
         // 재연결 시도 + terminal 폴링으로 UI가 running에 잠기지 않게 한다.
-        ensureObserver(currentRunId);
+        if (currentRunId) {
+            ensureObserver(currentRunId);
+        } else if (isRunning) {
+            // run id 없이 실행 중으로 고정된 상태(예: 409 보수 경로에서 상태 조회 실패).
+            // ensureObserver(null)은 no-op이라 복구 경로가 없으므로 미확정 실행 수렴으로 복구한다.
+            recoverUnidentifiedRun();
+        }
     }
 
     if (!hasShownCloseAlert) {
@@ -525,7 +531,7 @@ function handleProgressUpdate(update) {
         addLogEntry(update.message, 'info');
 
     } else if (update.type === 'analysis_progress') {
-        const percent = Math.round((update.current / update.total) * 100);
+        const percent = update.total > 0 ? Math.round((update.current / update.total) * 100) : 0;
         if (progressBar) {
             progressBar.classList.remove('pulse');
             progressBar.style.width = percent + '%';
@@ -539,7 +545,7 @@ function handleProgressUpdate(update) {
         }
 
     } else if (update.type === 'progress') {
-        const percent = Math.round((update.current / update.total) * 100);
+        const percent = update.total > 0 ? Math.round((update.current / update.total) * 100) : 0;
         if (progressBar) {
             progressBar.classList.remove('pulse');
             progressBar.style.width = percent + '%';

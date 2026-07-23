@@ -334,13 +334,11 @@ function isHistoryPanelOpen() {
 
 function syncHistoryPanelState(isOpen) {
     const sidebar = document.getElementById('history-sidebar');
-    const backdrop = document.getElementById('history-backdrop');
     if (sidebar) {
         sidebar.classList.toggle('open', isOpen);
         sidebar.setAttribute('aria-hidden', String(!isOpen));
         sidebar.inert = !isOpen;
     }
-    if (backdrop) backdrop.classList.toggle('show', isOpen);
     getHistoryToggleButtons().forEach((button) => button.setAttribute('aria-expanded', String(isOpen)));
     document.body.classList.toggle('history-panel-open', isOpen);
 
@@ -376,8 +374,6 @@ function toggleHistoryPanel() {
 }
 
 function initHistoryPanel() {
-    const backdrop = document.getElementById('history-backdrop');
-    const closeButton = document.getElementById('history-close-btn');
     const filterContainer = document.querySelector('.history-filters');
     syncHistoryPanelState(isHistoryPanelOpen());
 
@@ -386,8 +382,6 @@ function initHistoryPanel() {
     document.querySelectorAll('#run-mode-tabs .tab-label').forEach((label) => {
         label.addEventListener('click', closeHistoryPanel);
     });
-    if (backdrop) backdrop.addEventListener('click', closeHistoryPanel);
-    if (closeButton) closeButton.addEventListener('click', closeHistoryPanel);
     if (filterContainer) {
         filterContainer.addEventListener('click', (event) => {
             const button = event.target.closest('.history-filter-btn');

@@ -328,6 +328,33 @@ function ensureObserver(runId, options) {
     observeRunUntilTerminal(runId, { assumeActive });
 }
 
+// 실행은 확정됐지만(예: 409 보수 경로에서 다른 탭의 실행에 붙었을 때) run id를 몰라
+// 관찰자를 띄울 수 없는 상태에서 WebSocket마저 끊기면, ensureObserver(null)은 no-op이라
+// 복구 경로가 사라져 UI가 running에 영구히 잠긴다. run id 없이 서버 상태로 수렴해 실제
+// 실행을 채택(→ synchronizeRunStatus가 currentRunId를 세우고 ensureObserver로 정식 관찰자
+// 이관)하거나 idle/terminal로 복구한다. 관찰자 lease(runningObserverToken)를 잡지 않으므로
+// 채택 시 ensureObserver가 관찰자를 설치하는 것을 막지 않는다. 중복 실행은 플래그로 방지.
+let recoveringUnidentifiedRun = false;
+async function recoverUnidentifiedRun() {
+    if (recoveringUnidentifiedRun) return;
+    recoveringUnidentifiedRun = true;
+    try {
+        for (let attempt = 0; ; attempt++) {
+            // 채택돼 run id가 생겼거나(관찰자 인수), 실행이 끝났거나, 다른 관찰자가 소유
+            // 중이면 복구 종료.
+            if (!isRunning || currentRunId || runningObserverToken !== null) return;
+            const reconciliation = await synchronizeRunStatus(null, { observe: true });
+            if (!isRunning || currentRunId || runningObserverToken !== null) return;
+            if (reconciliation?.terminal || reconciliation?.idle) return;
+            // 조회 실패/stale이면 저빈도로 계속 수렴한다(영구 포기하지 않음).
+            const delayIndex = Math.min(attempt, statusConvergenceDelaysMs.length - 1);
+            await new Promise((resolve) => setTimeout(resolve, statusConvergenceDelaysMs[delayIndex]));
+        }
+    } finally {
+        recoveringUnidentifiedRun = false;
+    }
+}
+
 async function synchronizeRunStatus(expectedRunId = null, options = {}) {
     const requestedRevision = runStateRevision;
     const result = await getBackupRunStatusFromServer(expectedRunId);
