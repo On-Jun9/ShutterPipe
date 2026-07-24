@@ -85,6 +85,10 @@ func (s *Scanner) ScanWithContext(ctx context.Context, root string) ([]types.Fil
 		if err != nil {
 			return fmt.Errorf("failed to inspect source file %s: %w", path, err)
 		}
+		// 심볼릭 링크·FIFO 등 비정규 파일은 백업/검증 대상이 아니다.
+		if !info.Mode().IsRegular() {
+			return nil
+		}
 
 		entries = append(entries, types.FileEntry{
 			Path:      path,
@@ -146,7 +150,10 @@ func (s *Scanner) ScanCollectingWithContext(ctx context.Context, root string) ([
 			issues = append(issues, ScanIssue{Path: path, Err: infoErr})
 			return nil
 		}
-		if s.includeAll && !info.Mode().IsRegular() {
+		// 심볼릭 링크·FIFO 등 비정규 파일은 백업/검증 대상이 아니다. 원본 스캔에
+		// 포함되면 링크 자체 크기와 열었을 때의 대상 파일 크기가 달라 매 검증마다
+		// 오판정되고 재백업이 반복된다.
+		if !info.Mode().IsRegular() {
 			return nil
 		}
 

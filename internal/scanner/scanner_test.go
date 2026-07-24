@@ -109,3 +109,49 @@ func TestScanner_ScanReturnsEntryInfoError(t *testing.T) {
 		t.Fatalf("failed source entry was silently included: %+v", entries)
 	}
 }
+
+// TestScanner_SkipsNonRegularFiles는 테스트 코드 동작을 검증하거나 보조합니다.
+func TestScanner_SkipsNonRegularFiles(t *testing.T) {
+	tmpDir := t.TempDir()
+	regularPath := filepath.Join(tmpDir, "photo.jpg")
+	if err := os.WriteFile(regularPath, []byte("photo"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	linkPath := filepath.Join(tmpDir, "linked.jpg")
+	if err := os.Symlink(regularPath, linkPath); err != nil {
+		t.Skipf("symlink unsupported on this platform: %v", err)
+	}
+
+	s := New([]string{"jpg"})
+	entries, err := s.Scan(tmpDir)
+	if err != nil {
+		t.Fatalf("Scan failed: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Path != regularPath {
+		t.Fatalf("symlink was not skipped: %+v", entries)
+	}
+
+	// 검증 원본 스캔 경로: 확장자 필터 스캐너의 수집 스캔도 비정규 파일을 스킵해야 한다.
+	filtered, issues, err := s.ScanCollectingWithContext(context.Background(), tmpDir)
+	if err != nil {
+		t.Fatalf("filtered ScanCollectingWithContext failed: %v", err)
+	}
+	if len(issues) != 0 {
+		t.Fatalf("unexpected scan issues: %+v", issues)
+	}
+	if len(filtered) != 1 || filtered[0].Path != regularPath {
+		t.Fatalf("symlink was not skipped in filtered collecting scan: %+v", filtered)
+	}
+
+	all := NewAll()
+	collected, issues, err := all.ScanCollectingWithContext(context.Background(), tmpDir)
+	if err != nil {
+		t.Fatalf("ScanCollectingWithContext failed: %v", err)
+	}
+	if len(issues) != 0 {
+		t.Fatalf("unexpected scan issues: %+v", issues)
+	}
+	if len(collected) != 1 || collected[0].Path != regularPath {
+		t.Fatalf("symlink was not skipped in collecting scan: %+v", collected)
+	}
+}

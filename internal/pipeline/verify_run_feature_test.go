@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/On-Jun9/ShutterPipe/internal/state"
@@ -174,5 +175,68 @@ func TestRecordlessRequeuePreservesCollisionAndCreatesRenamedCopy(t *testing.T) 
 	}
 	if string(renamed) != "good" {
 		t.Fatalf("renamed copy content = %q", renamed)
+	}
+}
+
+func TestUnreadableDestinationDisablesRequeue(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows의 Chmod는 디렉터리 접근 권한을 제거하지 못한다")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	sourceDir := filepath.Join(home, "source")
+	destDir := filepath.Join(home, "dest")
+	if err := os.MkdirAll(sourceDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceDir, "photo.jpg"), []byte("good"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := newTestConfig(home, sourceDir, destDir)
+
+	backup, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backup.RunWithContext(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := backup.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// 도착 폴더의 분류 폴더를 읽지 못하게 만들어 실스캔이 불완전한 상황을 재현한다.
+	lockedDir := filepath.Join(destDir, cfg.UnclassifiedDir)
+	if err := os.Chmod(lockedDir, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(lockedDir, 0o755) })
+
+	verification, err := NewVerification(cfg, types.VerifyModeQuick, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := verification.RunWithContext(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := verification.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// 잠긴 폴더 때문에 문제 판정이 실제로 발생했는지 먼저 확인한다. 이 확인이 없으면
+	// 전부 OK로 끝난 검증(candidates 0)도 RequeueAllowed=false라 테스트가 자명 통과한다.
+	if result.Summary.Missing+result.Summary.Unverifiable == 0 {
+		t.Fatalf("locked destination did not produce problems: %+v", result.Summary)
+	}
+	if result.Summary.RequeueAllowed {
+		t.Fatalf("requeue allowed despite incomplete destination scan: %+v", result.Summary)
+	}
+	if result.Summary.RequeueEligible != 0 || len(result.RequeueCandidates) != 0 {
+		t.Fatalf("candidates survived incomplete destination scan: eligible=%d candidates=%d",
+			result.Summary.RequeueEligible, len(result.RequeueCandidates))
 	}
 }

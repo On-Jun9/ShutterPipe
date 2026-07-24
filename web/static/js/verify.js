@@ -121,9 +121,13 @@ function showVerifySummary(summary, runId, serverId) {
         : '';
     const duration = formatDuration(Math.round(Number(summary.duration || 0) / 1000000000));
     const canRequeue = !!summary.requeue_allowed && Number(summary.requeue_eligible || 0) > 0;
+    // 재백업이 차단된 사유별 안내: 해시 목록 형식 오류 외에도 도착 스캔 불완전 등으로
+    // 서버가 requeue를 비활성화하면 "문제 0건" 같은 오해 소지 라벨 대신 사유를 안내한다.
     const requeueLabel = incomplete
         ? '불완전한 해시 목록에서는 재복사 예약을 할 수 없습니다.'
-        : `문제 ${Number(summary.requeue_eligible || 0)}건, 다음 백업 때 다시 복사되게 하기`;
+        : !canRequeue && Number(summary.problem_count || 0) > 0
+            ? '재복사 예약을 할 수 없습니다. 경고와 문제 목록을 확인하세요.'
+            : `문제 ${Number(summary.requeue_eligible || 0)}건, 다음 백업 때 다시 복사되게 하기`;
 
     summaryContent.innerHTML = `
         <div class="summary-section verify-problems">

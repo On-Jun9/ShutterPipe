@@ -200,6 +200,7 @@ func (p *VerificationPipeline) RunWithContext(ctx context.Context) (*Verificatio
 
 	var destinationIndex *fileverify.DestinationIndex
 	var manifest *fileverify.Manifest
+	destScanIncomplete := false
 	if p.manifestPath != "" {
 		file, openErr := os.Open(p.manifestPath)
 		if openErr != nil {
@@ -233,7 +234,9 @@ func (p *VerificationPipeline) RunWithContext(ctx context.Context) (*Verificatio
 			p.logger.Info(fmt.Sprintf("Verification destination unreadable: %s - %v", issue.Path, issue.Err))
 		}
 		if len(destIssues) > 0 {
-			summary.Warnings = append(summary.Warnings, "읽지 못한 도착 경로가 있어 일부 파일은 검증 불가로 판정될 수 있습니다.")
+			// 매니페스트 형식 오류와 같은 원칙: 부재를 확정할 수 없으면 재백업을 권하지 않는다.
+			destScanIncomplete = true
+			summary.Warnings = append(summary.Warnings, "읽지 못한 도착 경로가 있어 일부 파일은 검증 불가로 판정될 수 있습니다. 파일 부재를 확정할 수 없어 재백업 큐 담기를 비활성화합니다.")
 		}
 		destinationIndex = fileverify.NewDestinationIndex(destEntries, len(destIssues) > 0)
 	}
@@ -290,11 +293,11 @@ func (p *VerificationPipeline) RunWithContext(ctx context.Context) (*Verificatio
 	if ambiguousQuickMatch {
 		summary.Warnings = append(summary.Warnings, "빠른 모드는 동명 사본이 여러 개일 때 이름과 크기만으로 오매칭할 수 있습니다. 정확한 판정은 정밀 모드를 사용하세요.")
 	}
-	if summary.IncompleteManifest {
+	if summary.IncompleteManifest || destScanIncomplete {
 		candidates = nil
 	}
 	summary.RequeueEligible = len(candidates)
-	summary.RequeueAllowed = !summary.IncompleteManifest && len(candidates) > 0
+	summary.RequeueAllowed = !summary.IncompleteManifest && !destScanIncomplete && len(candidates) > 0
 	return p.finish(summary, candidates, types.BackupStatusSuccess, nil)
 }
 
