@@ -468,7 +468,9 @@ function handleWebSocketClose(event, backupMayStillBeRunning, cancelInProgress) 
         }
     } else {
         // 실행 여부는 서버 상태가 확정할 때까지 유지하고 HTTP 취소는 계속 허용한다.
-        setCancelButtonState(true);
+        // 단, run id 미확정 상태(409 보수 경로)에서는 취소 요청이 만들 수 없어
+        // 항상 실패하므로 버튼을 열지 않는다. 실행 채택 후 복구 경로가 다시 연다.
+        setCancelButtonState(Boolean(currentRunId));
         addLogEntry('서버와의 연결이 끊겼습니다. 백업 상태를 확인할 수 없습니다.', 'error');
         // 정상 실행 중 연결이 끊기면 terminal 이벤트를 받을 경로가 없다. 관찰자를 시작해
         // 재연결 시도 + terminal 폴링으로 UI가 running에 잠기지 않게 한다.
@@ -584,7 +586,6 @@ function handleProgressUpdate(update) {
         }
         if (progressPercent) progressPercent.textContent = '100%';
         if (progressText) progressText.textContent = '완료!';
-        updateProgressReadout({ current: 1, total: 1 });
 
         addLogEntry(`${operationLabel} 작업이 완료되었습니다.`, 'success');
         if (operationKind === 'verify' && update.verify_summary) {

@@ -44,11 +44,11 @@
   .bookmark-item:hover, .autocomplete-item:hover, .autocomplete-item.selected { background: var(--inset); color: var(--text); }
   .bookmark-path { flex: 1; min-inline-size: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: 12px; }
   .bookmark-remove { padding: 4px; color: var(--danger); cursor: pointer; }
-  .bookmark-empty, .autocomplete-empty { padding: var(--space-5); color: var(--text-3); font-size: 13px; text-align: center; }
+  .bookmark-empty { padding: var(--space-5); color: var(--text-3); font-size: 13px; text-align: center; }
 
   /* 오류 상태 */
-  .path-input-group.has-error .input-modern, .input-modern.input-error { border-color: var(--danger); }
-  .path-input-group.has-error .input-modern:focus, .input-modern.input-error:focus { outline-color: var(--danger); }
+  .path-input-group.has-error .input-modern { border-color: var(--danger); }
+  .path-input-group.has-error .input-modern:focus { outline-color: var(--danger); }
 
   /* 파일 선택: 네이티브 필드 대신 보조 버튼 + 파일명 텍스트로 */
   input[type="file"].input-modern { min-block-size: 36px; padding: 0; border: 0; background: transparent; color: var(--text-3); font-size: 12.5px; cursor: pointer; }

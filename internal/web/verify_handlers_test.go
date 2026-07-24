@@ -310,6 +310,21 @@ func TestHandleVerifyRequeueRejectsWhileRunIsActive(t *testing.T) {
 	s.runs().Finish("active-run", RunStatusComplete, nil, "")
 }
 
+func TestHandleVerifyRequeueRejectsTrailingBody(t *testing.T) {
+	s := &Server{}
+	body, err := json.Marshal(verifyRequeueRequest{RunID: "verify-run", ServerID: s.instanceID()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := append(body, []byte(`{"run_id":"second"}`)...)
+	req := httptest.NewRequest(http.MethodPost, "/api/verify/requeue", bytes.NewReader(payload))
+	rr := httptest.NewRecorder()
+	s.handleVerifyRequeue(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
 func quoteJSON(t *testing.T, value string) string {
 	t.Helper()
 	data, err := json.Marshal(value)

@@ -18,7 +18,7 @@ function getPresetCheckboxValue(id) {
 }
 
 function getPresetToggleButtons() {
-    return document.querySelectorAll('[aria-controls="presetSidebar"], .preset-toggle-btn');
+    return document.querySelectorAll('[aria-controls="presetSidebar"]');
 }
 
 function isPresetSidebarOpen(sidebar) {
@@ -223,6 +223,9 @@ async function loadPresetByName(presetName) {
         if (typeof toggleEventNameInput === 'function') toggleEventNameInput();
         if (typeof updateDateFilterButtons === 'function') updateDateFilterButtons();
         if (typeof updateBookmarkButtons === 'function') updateBookmarkButtons();
+        // 프로그램적 값 대입은 change 이벤트를 내지 않으므로 실행 요약/버튼 라벨을 직접 갱신
+        if (typeof updateRunConfigurationSummary === 'function') updateRunConfigurationSummary();
+        if (typeof updateRunActionLabels === 'function') updateRunActionLabels();
 
         closePresetSidebar();
         showNotification(`프리셋 "${presetName}"을 불러왔습니다`, 'success');
@@ -370,13 +373,6 @@ function initPresetPanel() {
             if (button.dataset.action === 'delete') deletePresetByName(button.dataset.preset);
         });
     }
-    document.querySelectorAll('[popovertarget="presetSidebar"]').forEach((button) => {
-        button.removeAttribute('onclick');
-        button.addEventListener('click', (event) => {
-            event.preventDefault();
-            togglePresetSidebar();
-        });
-    });
     if (backdrop) backdrop.addEventListener('click', closePresetSidebar);
 
     document.addEventListener('click', (event) => {

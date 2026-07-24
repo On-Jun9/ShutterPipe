@@ -143,6 +143,14 @@ async function loadSettings() {
     if (typeof updateBookmarkButtons === 'function') {
         updateBookmarkButtons();
     }
+
+    // 프로그램적 값 대입은 change 이벤트를 내지 않으므로 실행 요약/버튼 라벨을 직접 갱신
+    if (typeof updateRunConfigurationSummary === 'function') {
+        updateRunConfigurationSummary();
+    }
+    if (typeof updateRunActionLabels === 'function') {
+        updateRunActionLabels();
+    }
 }
 
 // 설정 저장

@@ -244,9 +244,20 @@ func (s *Server) runVerification(runCtx context.Context, cancelRun func(), runID
 }
 
 func (s *Server) handleVerifyRequeue(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var req verifyRequeueRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeAPIError(w, http.StatusBadRequest, err.Error())
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(&req); err != nil {
+		writeAPIError(w, multipartErrorStatus(err), err.Error())
+		return
+	}
+	// 첫 JSON 값 뒤에 잉여 데이터가 붙은 요청은 거부한다. 단일 Decode는 뒤를 읽지
+	// 않아 크기 제한이 본문 전체에 적용되지 않는다.
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		if err == nil {
+			err = errors.New("unexpected data after JSON body")
+		}
+		writeAPIError(w, multipartErrorStatus(err), "unexpected data after JSON body: "+err.Error())
 		return
 	}
 	if req.RunID == "" {

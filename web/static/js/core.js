@@ -15,6 +15,7 @@ let runCancelRequested = false;  // 취소 요청 전송 완료 후 서버 응�
 let currentRunId = null;  // 현재 UI가 추적 중인 서버 실행 ID
 let currentRunKind = null;  // backup | verify
 let terminalRunId = null;  // terminal 이벤트를 처리한 마지막 실행 ID
+let resultsRunId = null;  // 결과 패널(파일 목록/요약)이 표시 중인 실행 ID
 let runStateRevision = 0;  // 늦게 도착한 비동기 응답 무효화용 단조 증가 값
 let runStatus = 'idle';  // idle | running | cancelling
 let lastServerRevision = 0;  // 서버 snapshot/event의 단조 증가 revision
