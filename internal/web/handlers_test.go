@@ -110,7 +110,7 @@ func TestHandleRun_ReturnsConflictWhenAlreadyRunning(t *testing.T) {
 		t.Fatalf("expected status 409, got %d", rr.Code)
 	}
 	response := decodeAPIErrorResponse(t, rr)
-	if response.Message != "backup already running" {
+	if response.Message != "another operation is already running" {
 		t.Fatalf("unexpected message: %s", response.Message)
 	}
 }

@@ -1,422 +1,76 @@
-/* Form Components */
+@layer components {
+  /* 날짜 빠른 선택 타일 */
+  .date-filter-buttons { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--space-3); max-inline-size: 640px; }
+  .btn-date-filter { position: relative; display: grid; justify-items: start; gap: 1px; padding: 13px 15px; border: 1px solid var(--border-strong); border-radius: var(--radius-l); background: var(--surface); text-align: start; cursor: pointer; transition: border-color var(--motion-fast), background-color var(--motion-fast); }
+  .btn-date-filter b { font-size: 14px; font-weight: 600; letter-spacing: -.01em; color: var(--text); }
+  .btn-date-filter small { color: var(--text-3); font-size: 12px; }
+  .btn-date-filter:hover { border-color: var(--text-3); }
+  .btn-date-filter.active { padding: 12px 14px; border: 2px solid var(--accent); background: var(--accent-muted); }
+  .btn-date-filter.active::after { content: ""; position: absolute; inset-block-start: 10px; inset-inline-end: 10px; inline-size: 16px; block-size: 16px; border-radius: 50%; background: var(--accent) url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path d="M4.5 8.5l2.5 2.5 4.5-5" stroke="white" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>') center / contain no-repeat; }
 
-/* ==================== Date Filter Buttons ==================== */
-.btn-date-filter {
-  padding: 8px 16px;
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--color-text-secondary);
-  background: var(--color-bg-secondary);
-  border: 2px solid var(--color-border);
-  border-radius: 10px;
-  cursor: pointer;
-  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-  user-select: none;
-}
+  /* 세그먼트 (검증 비교 모드) */
+  .segmented { display: inline-flex; flex-wrap: wrap; gap: 2px; padding: 3px; border: 1px solid var(--border); border-radius: var(--radius-l); background: var(--inset); }
+  .seg-label { display: grid; justify-items: center; gap: 1px; min-block-size: 44px; padding: 6px 18px; border-radius: var(--radius-m); color: var(--text-2); cursor: pointer; transition: background-color var(--motion-fast), color var(--motion-fast); }
+  .seg-label:hover { color: var(--text); }
+  .seg-radio:checked + .seg-label { background: var(--surface); color: var(--text); box-shadow: 0 0 0 1px var(--border-strong); }
+  .seg-title { font-size: 13px; font-weight: 600; }
+  .seg-sub { font-size: 11px; color: var(--text-3); }
+  .seg-radio:checked + .seg-label .seg-sub { color: var(--text-2); }
 
-.btn-date-filter:hover {
-  background: var(--color-bg-tertiary);
-  border-color: var(--color-primary);
-  color: var(--color-text-primary);
-}
+  /* 확장자 태그 */
+  .tags-container { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-block: var(--space-1) var(--space-3); }
+  .tags-container:empty { display: none; }
+  .tag { display: inline-flex; align-items: center; gap: 5px; max-inline-size: 100%; padding: 5px 10px; border: 0; border-radius: var(--radius-s); background: var(--inset); color: var(--text-2); font: 500 12px/1.4 var(--font-mono); }
+  .tag-remove { display: inline-grid; place-items: center; inline-size: 16px; block-size: 16px; border-radius: var(--radius-s); color: var(--text-3); cursor: pointer; }
+  .tag-remove:hover { background: color-mix(in srgb, var(--danger) 12%, transparent); color: var(--danger); }
+  .extension-filter-field .input-modern { max-inline-size: 360px; font-size: 13px; }
+  .help-text { display: inline; margin-inline-start: var(--space-2); color: var(--text-3); font-size: 12.5px; font-weight: 400; }
 
-.btn-date-filter.active {
-  background: linear-gradient(135deg, var(--color-primary) 0%, var(--color-primary-dark) 100%);
-  color: white;
-  border-color: var(--color-primary);
-  box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3);
-}
+  /* 경로 입력 */
+  .path-input-group { display: flex; align-items: stretch; gap: var(--space-2); min-inline-size: 0; }
+  .path-input-wrapper { position: relative; flex: 1 1 auto; min-inline-size: 0; }
+  .btn-bookmark { display: inline-grid; place-items: center; inline-size: 44px; min-inline-size: 44px; block-size: 44px; padding: 0; border: 1px solid var(--border-strong); border-radius: var(--radius-m); background: var(--surface); color: var(--text-3); cursor: pointer; transition: background-color var(--motion-fast), color var(--motion-fast); }
+  .btn-bookmark:hover { background: var(--inset); color: var(--text); }
+  .btn-bookmark.active { border-color: var(--accent); color: var(--accent); }
+  .btn-bookmark.active svg { fill: currentColor; }
 
-/* ==================== Tab UI ==================== */
-.tab-header {
-  display: flex;
-  gap: 8px;
-  margin-bottom: 32px;
-  padding-bottom: 16px;
-  border-bottom: 2px solid var(--color-border);
-  position: relative;
-}
+  /* 드롭다운 (자동완성·북마크) */
+  .bookmark-dropdown, .autocomplete-dropdown { z-index: 100; max-inline-size: calc(100vw - 24px); overflow: auto; border: 1px solid var(--border); border-radius: var(--radius-l); background: var(--surface); box-shadow: var(--overlay-shadow); }
+  .bookmark-dropdown { position: fixed; inline-size: min(300px, calc(100vw - 24px)); max-block-size: min(320px, calc(100vh - 32px)); }
+  .autocomplete-dropdown { position: absolute; inset: calc(100% + 4px) 0 auto; max-block-size: 240px; }
+  .bookmark-dropdown-header, .bookmark-item, .autocomplete-item { display: flex; align-items: center; gap: var(--space-2); min-block-size: 40px; padding: var(--space-2) var(--space-3); border-bottom: 1px solid var(--border); }
+  .bookmark-dropdown-header { justify-content: space-between; color: var(--text); font-size: 13px; font-weight: 600; }
+  .bookmark-item, .autocomplete-item { color: var(--text-2); cursor: pointer; font-size: 13px; }
+  .bookmark-item:hover, .autocomplete-item:hover, .autocomplete-item.selected { background: var(--inset); color: var(--text); }
+  .bookmark-path { flex: 1; min-inline-size: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: 12px; }
+  .bookmark-remove { padding: 4px; color: var(--danger); cursor: pointer; }
+  .bookmark-empty { padding: var(--space-5); color: var(--text-3); font-size: 13px; text-align: center; }
 
-.tab-radio {
-  position: absolute;
-  opacity: 0;
-  pointer-events: none;
-}
+  /* 오류 상태 */
+  .path-input-group.has-error .input-modern { border-color: var(--danger); }
+  .path-input-group.has-error .input-modern:focus { outline-color: var(--danger); }
 
-.tab-label {
-  padding: 12px 24px;
-  font-size: 15px;
-  font-weight: 600;
-  color: var(--color-text-secondary);
-  background: var(--color-bg-secondary);
-  border-radius: 10px;
-  cursor: pointer;
-  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-  user-select: none;
-}
+  /* 파일 선택: 네이티브 필드 대신 보조 버튼 + 파일명 텍스트로 */
+  input[type="file"].input-modern { min-block-size: 36px; padding: 0; border: 0; background: transparent; color: var(--text-3); font-size: 12.5px; cursor: pointer; }
+  /* .btn-small과 동일한 스펙 (통일) */
+  input[type="file"].input-modern::file-selector-button { min-block-size: 32px; margin-inline-end: var(--space-3); padding: 5px 10px; border: 1px solid var(--border-strong); border-radius: var(--radius-m); background: var(--surface); color: var(--text); font: 500 12.5px/1.25 var(--font-ui); cursor: pointer; transition: background-color var(--motion-fast); }
+  input[type="file"].input-modern::file-selector-button:hover { background: var(--inset); }
+  input[type="file"].input-modern:focus { outline: none; }
+  input[type="file"].input-modern:focus-visible::file-selector-button { outline: 2px solid var(--focus); outline-offset: 2px; }
 
-.tab-label:hover {
-  background: var(--color-bg-tertiary);
-  color: var(--color-text-primary);
-}
+  input[type="number"].input-modern { appearance: textfield; }
+  input[type="number"].input-modern::-webkit-inner-spin-button, input[type="number"].input-modern::-webkit-outer-spin-button { margin: 0; appearance: none; }
 
-.tab-radio:checked + .tab-label {
-  background: linear-gradient(135deg, var(--color-primary) 0%, var(--color-primary-dark) 100%);
-  color: white;
-  box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3);
-}
+  @supports (anchor-name: --bookmark-anchor) {
+    .btn-bookmark { anchor-name: --bookmark-anchor; }
+    .bookmark-dropdown { position-anchor: --bookmark-anchor; }
+  }
 
-.tab-content {
-  display: none;
-  animation: fadeIn 0.4s ease;
-}
-
-#tab-basic:checked ~ #basic-settings {
-  display: block;
-}
-
-#tab-advanced:checked ~ #advanced-settings {
-  display: block;
-}
-
-/* ==================== Tags Input ==================== */
-.tags-container {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  padding: 12px;
-  background: var(--color-bg-secondary);
-  border: 2px solid var(--color-border);
-  border-radius: 12px;
-  min-height: 50px;
-  margin-bottom: 12px;
-  transition: all 0.2s ease;
-}
-
-.tags-container:focus-within {
-  border-color: var(--color-primary);
-  background: var(--color-bg-primary);
-  box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.1);
-}
-
-.tag {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 12px;
-  background: linear-gradient(135deg, var(--color-primary) 0%, var(--color-primary-dark) 100%);
-  color: white;
-  border-radius: 8px;
-  font-size: 13px;
-  font-weight: 600;
-  animation: slideInRight 0.2s ease;
-}
-
-.tag-remove {
-  cursor: pointer;
-  font-size: 16px;
-  line-height: 1;
-  opacity: 0.8;
-  transition: opacity 0.2s ease;
-}
-
-.tag-remove:hover {
-  opacity: 1;
-}
-
-/* ==================== Help Text ==================== */
-.help-text {
-  display: block;
-  font-size: 12px;
-  font-weight: 400;
-  color: var(--color-text-tertiary);
-  margin-top: 4px;
-}
-
-/* ==================== Number Input ==================== */
-input[type="number"].input-modern {
-  -moz-appearance: textfield;
-}
-
-input[type="number"].input-modern::-webkit-inner-spin-button,
-input[type="number"].input-modern::-webkit-outer-spin-button {
-  -webkit-appearance: none;
-  margin: 0;
-}
-
-/* ==================== Path Input Group ==================== */
-.path-input-group {
-  position: relative;
-  display: flex;
-  gap: 8px;
-  align-items: center;
-}
-
-.path-input-wrapper {
-  flex: 1;
-  position: relative;
-}
-
-/* ==================== Bookmark Button ==================== */
-.btn-bookmark {
-  background: var(--color-bg-secondary);
-  border: 2px solid var(--color-border);
-  border-radius: 12px;
-  padding: 12px 16px;
-  cursor: pointer;
-  transition: all 0.2s ease;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 48px;
-  height: 48px;
-  color: var(--color-text-secondary);
-}
-
-.btn-bookmark svg {
-  stroke: currentColor;
-  fill: none;
-  transition: all 0.2s ease;
-}
-
-.btn-bookmark:hover {
-  background: var(--color-bg-tertiary);
-  border-color: var(--color-primary);
-  transform: scale(1.05);
-  color: var(--color-primary);
-}
-
-.btn-bookmark.active {
-  background: linear-gradient(135deg, #fbbf24 0%, #f59e0b 100%);
-  border-color: #f59e0b;
-  color: white;
-}
-
-.btn-bookmark.active svg {
-  stroke: white;
-  fill: white;
-}
-
-/* ==================== Bookmark Dropdown ==================== */
-.bookmark-dropdown {
-  position: fixed;
-  background: white;
-  border: 2px solid var(--color-border);
-  border-radius: 12px;
-  box-shadow: var(--shadow-xl);
-  min-width: 300px;
-  max-width: 400px;
-  max-height: 300px;
-  overflow-y: auto;
-  z-index: 10000;
-  animation: slideInUp 0.2s ease;
-}
-
-.bookmark-dropdown-header {
-  padding: 12px 16px;
-  border-bottom: 1px solid var(--color-border);
-  font-weight: 600;
-  color: var(--color-text-primary);
-  font-size: 14px;
-  background: var(--color-bg-secondary);
-  border-radius: 12px 12px 0 0;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
-
-.bookmark-item {
-  padding: 12px 16px;
-  cursor: pointer;
-  transition: all 0.2s ease;
-  border-bottom: 1px solid var(--color-border);
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 8px;
-}
-
-.bookmark-item:last-child {
-  border-bottom: none;
-}
-
-.bookmark-item:hover {
-  background: var(--color-bg-secondary);
-}
-
-.bookmark-path {
-  flex: 1;
-  font-size: 14px;
-  color: var(--color-text-secondary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.bookmark-remove {
-  color: var(--color-danger);
-  font-size: 18px;
-  cursor: pointer;
-  opacity: 0.6;
-  transition: opacity 0.2s ease;
-  padding: 4px;
-}
-
-.bookmark-remove:hover {
-  opacity: 1;
-}
-
-.bookmark-empty {
-  padding: 24px;
-  text-align: center;
-  color: var(--color-text-tertiary);
-  font-size: 14px;
-}
-
-/* ==================== Autocomplete Dropdown ==================== */
-.autocomplete-dropdown {
-  position: absolute;
-  top: calc(100% + 4px);
-  left: 0;
-  right: 0;
-  background: white;
-  border: 2px solid var(--color-primary);
-  border-radius: 12px;
-  box-shadow: var(--shadow-xl);
-  max-height: 200px;
-  overflow-y: auto;
-  z-index: 999;
-  animation: slideInUp 0.15s ease;
-}
-
-.autocomplete-item {
-  padding: 12px 16px;
-  cursor: pointer;
-  transition: all 0.15s ease;
-  border-bottom: 1px solid var(--color-border);
-  font-size: 14px;
-  color: var(--color-text-secondary);
-}
-
-.autocomplete-item:last-child {
-  border-bottom: none;
-}
-
-.autocomplete-item:hover,
-.autocomplete-item.selected {
-  background: var(--color-bg-secondary);
-  color: var(--color-text-primary);
-}
-
-.autocomplete-item.selected {
-  background: rgba(99, 102, 241, 0.1);
-  color: var(--color-primary);
-  font-weight: 600;
-}
-
-.autocomplete-empty {
-  padding: 16px;
-  text-align: center;
-  color: var(--color-text-tertiary);
-  font-size: 13px;
-}
-
-/* Scrollbar Styles */
-.autocomplete-dropdown::-webkit-scrollbar,
-.bookmark-dropdown::-webkit-scrollbar {
-  width: 6px;
-}
-
-.autocomplete-dropdown::-webkit-scrollbar-track,
-.bookmark-dropdown::-webkit-scrollbar-track {
-  background: var(--color-bg-tertiary);
-  border-radius: 999px;
-}
-
-.autocomplete-dropdown::-webkit-scrollbar-thumb,
-.bookmark-dropdown::-webkit-scrollbar-thumb {
-  background: var(--color-text-tertiary);
-  border-radius: 999px;
-}
-
-.autocomplete-dropdown::-webkit-scrollbar-thumb:hover,
-.bookmark-dropdown::-webkit-scrollbar-thumb:hover {
-  background: var(--color-text-secondary);
-}
-
-/* Preset Card (legacy - kept for compatibility) */
-.preset-card {
-  background: var(--color-bg-secondary);
-  border: 2px solid var(--color-border);
-  border-radius: 12px;
-  padding: 16px;
-  cursor: pointer;
-  transition: all 0.2s ease;
-  position: relative;
-}
-
-.preset-card:hover {
-  border-color: var(--color-primary);
-  background: var(--color-bg-primary);
-  transform: translateY(-2px);
-  box-shadow: var(--shadow-md);
-}
-
-.preset-card.selected {
-  border-color: var(--color-primary);
-  background: rgba(99, 102, 241, 0.05);
-}
-
-.preset-card-title {
-  font-size: 16px;
-  font-weight: 600;
-  color: var(--color-text-primary);
-  margin-bottom: 8px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.preset-card-description {
-  font-size: 14px;
-  color: var(--color-text-secondary);
-  margin-bottom: 12px;
-  line-height: 1.4;
-}
-
-.preset-card-meta {
-  font-size: 12px;
-  color: var(--color-text-tertiary);
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.preset-card-tag {
-  background: var(--color-bg-tertiary);
-  padding: 4px 8px;
-  border-radius: 6px;
-  font-size: 11px;
-  font-weight: 500;
-}
-
-/* ==================== Input Error State ==================== */
-.input-modern.input-error {
-  border-color: #ef4444;
-  background: #fef2f2;
-}
-
-.input-modern.input-error:focus {
-  border-color: #dc2626;
-  box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.1);
-}
-
-.path-input-group.has-error .input-modern {
-  border-color: #ef4444;
-  background: #fef2f2;
-}
-
-.path-input-group.has-error .input-modern:focus {
-  border-color: #dc2626;
-  box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.1);
+  @media (max-width: 640px) {
+    .date-filter-buttons { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .path-input-group { gap: var(--space-1); }
+    .segmented { inline-size: 100%; }
+    .seg-label { flex: 1 1 0; }
+    .extension-filter-field .input-modern { max-inline-size: none; }
+  }
 }

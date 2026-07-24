@@ -3,6 +3,7 @@
 package pipeline
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -23,6 +24,9 @@ func acquireRunLock(path string) (*runLock, error) {
 	}
 	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		_ = file.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, fmt.Errorf("lock %s: %w", path, errRunLockHeld)
+		}
 		return nil, fmt.Errorf("lock %s: %w", path, err)
 	}
 	return &runLock{file: file}, nil

@@ -1,21 +1,47 @@
-/* CSS Variables */
-:root {
-  --color-primary: #6366f1;
-  --color-primary-dark: #4f46e5;
-  --color-primary-light: #818cf8;
-  --color-success: #10b981;
-  --color-success-dark: #059669;
-  --color-warning: #f59e0b;
-  --color-danger: #ef4444;
-  --color-bg-primary: #ffffff;
-  --color-bg-secondary: #f8fafc;
-  --color-bg-tertiary: #f1f5f9;
-  --color-text-primary: #0f172a;
-  --color-text-secondary: #475569;
-  --color-text-tertiary: #94a3b8;
-  --color-border: #e2e8f0;
-  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
-  --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
-  --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
-  --shadow-xl: 0 20px 25px -5px rgb(0 0 0 / 0.1), 0 8px 10px -6px rgb(0 0 0 / 0.1);
+@layer tokens {
+  /* Apple 실측 중성 팔레트 (DESIGN.md) + Figma 실측 보더/포커스 (DESIGN-2.md)
+     light-dark(라이트값, 다크값): 적용 모드는 color-scheme이 결정한다. */
+  :root {
+    color-scheme: light dark;
+    /* 배경 3단차: canvas(페이지) < surface(카드·입력) > inset(파인 영역) */
+    --canvas: light-dark(#F5F5F7, #131315);
+    --surface: light-dark(#FFFFFF, #1C1C1E);
+    --inset: light-dark(#E9E9EE, #2C2C2E);
+    --panel: light-dark(#FFFFFF, #232326);
+    --border: light-dark(#E8E8ED, #38383A);
+    --border-strong: light-dark(#D2D2D7, #48484A);
+    --text: light-dark(#1D1D1F, #F5F5F7);
+    --text-2: light-dark(#515154, #AEAEB2);
+    --text-3: light-dark(#86868B, #8E8E93);
+    /* 다크에서는 채움(버튼·진행바)과 소형 강조를 분리해 파랑의 자극을 낮춘다 */
+    --accent: light-dark(#0071E3, #5AA2E8);
+    --accent-strong: light-dark(#0066CC, #7FB8ED);
+    --accent-muted: light-dark(rgba(0, 113, 227, .08), rgba(90, 162, 232, .14));
+    --accent-fill: light-dark(#0071E3, #1268C3);
+    --accent-fill-hover: light-dark(#0066CC, #2276D2);
+    --focus: #0D99FF;
+    --success: light-dark(#34C759, #30D158);
+    --warning: light-dark(#FF9500, #FF9F0A);
+    --danger: light-dark(#FF3B30, #FF453A);
+    --shadow-soft: light-dark(rgb(0 0 0 / .10), rgb(0 0 0 / .45));
+    --shadow-edge: light-dark(rgb(0 0 0 / .08), rgb(0 0 0 / .35));
+    --overlay-shadow: 0 24px 70px var(--shadow-soft), 0 4px 16px var(--shadow-edge);
+    --font-ui: -apple-system, system-ui, "Segoe UI", Roboto, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
+    --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px;
+    --space-5: 20px; --space-6: 24px; --space-7: 32px; --space-8: 48px;
+    --radius-s: 6px; --radius-m: 8px; --radius-l: 12px; --radius-xl: 16px; --radius-pill: 999px;
+    --motion-fast: 140ms ease; --motion: 200ms ease;
+    /* Compatibility aliases for scripts and remaining inline markup. */
+    --color-primary: var(--accent); --color-primary-dark: var(--accent-strong);
+    --color-success: var(--success); --color-success-dark: var(--success);
+    --color-danger: var(--danger); --color-bg-primary: var(--surface);
+    --color-bg-secondary: var(--surface); --color-bg-tertiary: var(--inset);
+    --color-border: var(--border); --color-text-primary: var(--text);
+    --color-text-secondary: var(--text-2); --color-text-tertiary: var(--text-3);
+  }
+
+  /* 테마 선택: 시스템(기본)은 OS 설정, light/dark는 강제 고정 */
+  :root[data-theme="light"] { color-scheme: light; }
+  :root[data-theme="dark"] { color-scheme: dark; }
 }

@@ -44,6 +44,27 @@ type ProcessedFile struct {
 	SidecarHash            string `json:"sidecar_hash,omitempty"`
 }
 
+type RebackupMarker struct {
+	VerificationRunID     string              `json:"verification_run_id"`
+	SourcePath            string              `json:"source_path"`
+	DestPath              string              `json:"dest_path,omitempty"`
+	Verdict               types.VerifyVerdict `json:"verdict"`
+	ConfigFingerprint     string              `json:"config_fingerprint"`
+	SourceSize            int64               `json:"source_size"`
+	SourceModTimeUnixNano int64               `json:"source_mod_time_unix_nano"`
+	SourceHash            string              `json:"source_hash,omitempty"`
+	// Sidecar* pin the classification input that produced DestPath. If the
+	// sidecar (e.g. a video's M01.XML) changes between marking and applying,
+	// the planned destination may differ from the recorded DestPath, so the
+	// marker must be discarded and the file re-classified through the normal
+	// backup flow instead of being force-overwritten to a stale destination.
+	SidecarPresent         bool   `json:"sidecar_present,omitempty"`
+	SidecarPath            string `json:"sidecar_path,omitempty"`
+	SidecarSize            int64  `json:"sidecar_size,omitempty"`
+	SidecarModTimeUnixNano int64  `json:"sidecar_mod_time_unix_nano,omitempty"`
+	SidecarHash            string `json:"sidecar_hash,omitempty"`
+}
+
 // SourceContext bundles the inputs, beyond the source file's own identity, that
 // determine where the file is published. A change in any of them means a prior
 // state record must not shortcut the run.
@@ -68,14 +89,16 @@ func (c SourceContext) matchesRecord(record ProcessedFile) bool {
 type State struct {
 	mu        sync.RWMutex
 	filePath  string
-	Processed map[string]ProcessedFile `json:"processed"`
-	LastRun   time.Time                `json:"last_run"`
+	Processed map[string]ProcessedFile  `json:"processed"`
+	Rebackup  map[string]RebackupMarker `json:"rebackup,omitempty"`
+	LastRun   time.Time                 `json:"last_run"`
 }
 
 func New(filePath string) *State {
 	return &State{
 		filePath:  filePath,
 		Processed: make(map[string]ProcessedFile),
+		Rebackup:  make(map[string]RebackupMarker),
 	}
 }
 
@@ -92,6 +115,12 @@ func Load(filePath string) (*State, error) {
 
 	if err := json.Unmarshal(data, s); err != nil {
 		return nil, err
+	}
+	if s.Processed == nil {
+		s.Processed = make(map[string]ProcessedFile)
+	}
+	if s.Rebackup == nil {
+		s.Rebackup = make(map[string]RebackupMarker)
 	}
 
 	return s, nil
@@ -296,4 +325,60 @@ func (s *State) MarkProcessed(path string, size int64, destPath string) {
 		Timestamp: time.Now(),
 	}
 	s.LastRun = time.Now()
+}
+
+// ProcessedSnapshotForRequeue returns a stable identity for stale-result
+// checks and a destination only when the record still describes this source
+// and classification context. Destination contents are deliberately not
+// checked: a missing or damaged destination is exactly what requeue repairs.
+func (s *State) ProcessedSnapshotForRequeue(entry types.FileEntry, sctx SourceContext) (recordID string, present bool, trustedDestPath string) {
+	s.mu.RLock()
+	record, ok := s.Processed[entry.Path]
+	s.mu.RUnlock()
+	if !ok {
+		return "", false, ""
+	}
+	recordID = ProcessedRecordID(record)
+	trusted := record.IdentityVersion >= 2 &&
+		record.Path == entry.Path &&
+		record.Size == entry.Size &&
+		record.SourceModTimeUnixNano == entry.ModTime.UnixNano() &&
+		record.DestPath != "" &&
+		!record.Superseded &&
+		sctx.matchesRecord(record)
+	if trusted {
+		trustedDestPath = record.DestPath
+	}
+	return recordID, true, trustedDestPath
+}
+
+func ProcessedRecordID(record ProcessedFile) string {
+	data, err := json.Marshal(record)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(data)
+	return fmt.Sprintf("%x", sum[:])
+}
+
+func (s *State) RebackupMarker(path string) (RebackupMarker, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	marker, ok := s.Rebackup[path]
+	return marker, ok
+}
+
+func (s *State) SetRebackupMarker(marker RebackupMarker) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.Rebackup == nil {
+		s.Rebackup = make(map[string]RebackupMarker)
+	}
+	s.Rebackup[marker.SourcePath] = marker
+}
+
+func (s *State) RemoveRebackupMarker(path string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.Rebackup, path)
 }

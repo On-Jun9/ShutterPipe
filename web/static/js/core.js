@@ -13,7 +13,9 @@ let hasShownCloseAlert = false;  // ws.onclose 중복 알림 방지
 let runCancelPending = false;  // 취소 요청 전송 중
 let runCancelRequested = false;  // 취소 요청 전송 완료 후 서버 응답 대기 중
 let currentRunId = null;  // 현재 UI가 추적 중인 서버 실행 ID
+let currentRunKind = null;  // backup | verify
 let terminalRunId = null;  // terminal 이벤트를 처리한 마지막 실행 ID
+let resultsRunId = null;  // 결과 패널(파일 목록/요약)이 표시 중인 실행 ID
 let runStateRevision = 0;  // 늦게 도착한 비동기 응답 무효화용 단조 증가 값
 let runStatus = 'idle';  // idle | running | cancelling
 let lastServerRevision = 0;  // 서버 snapshot/event의 단조 증가 revision
@@ -21,10 +23,11 @@ let lastServerId = null;  // revision을 발행한 서버 프로세스 ID
 let retiredServerIds = new Set();  // 새 서버 확인 뒤 지연 도착한 이전 서버 이벤트 차단
 
 // 확장자 목록
-let includeExtensions = [
+const DEFAULT_INCLUDE_EXTENSIONS = [
     'jpg', 'jpeg', 'heic', 'heif', 'png', 'raw', 'arw', 'cr2', 'nef', 'dng',
     'mp4', 'mov', 'avi', 'mkv', 'mxf', 'xml'
 ];
+let includeExtensions = [...DEFAULT_INCLUDE_EXTENSIONS];
 
 // 경로 히스토리 (최대 10개)
 let pathHistory = {

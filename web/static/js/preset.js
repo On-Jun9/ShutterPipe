@@ -1,148 +1,233 @@
 // Preset Management Module
-// 설정 프리셋 관리 기능
 
 let currentPresets = [];
-let selectedPreset = null;
+let presetUsesPopover = false;
 
-// 사이드바 토글
-function togglePresetSidebar() {
-    const sidebar = document.getElementById('presetSidebar');
-    const backdrop = document.getElementById('presetBackdrop');
-
-    sidebar.classList.toggle('active');
-    backdrop.classList.toggle('active');
+function getPresetElement(id) {
+    return document.getElementById(id);
 }
 
-// 페이지 로드 시 프리셋 목록 불러오기
+function getPresetInputValue(id, fallback = '') {
+    const input = getPresetElement(id);
+    return input ? input.value : fallback;
+}
+
+function getPresetCheckboxValue(id) {
+    const input = getPresetElement(id);
+    return Boolean(input?.checked);
+}
+
+function getPresetToggleButtons() {
+    return document.querySelectorAll('[aria-controls="presetSidebar"]');
+}
+
+function isPresetSidebarOpen(sidebar) {
+    if (!sidebar) return false;
+    try {
+        if (sidebar.matches(':popover-open')) return true;
+    } catch (_) {
+        // Popover selectors are not available in older browsers.
+    }
+    return sidebar.classList.contains('active');
+}
+
+function syncPresetSidebarState(isOpen) {
+    const sidebar = getPresetElement('presetSidebar');
+    const backdrop = getPresetElement('presetBackdrop');
+
+    if (sidebar) {
+        sidebar.classList.toggle('active', isOpen);
+        sidebar.setAttribute('aria-hidden', String(!isOpen));
+    }
+    if (backdrop) backdrop.classList.toggle('active', isOpen && !presetUsesPopover);
+    getPresetToggleButtons().forEach((button) => {
+        button.setAttribute('aria-expanded', String(isOpen));
+    });
+}
+
+function openPresetSidebar() {
+    const sidebar = getPresetElement('presetSidebar');
+    if (!sidebar) return;
+
+    if (typeof sidebar.showPopover === 'function') {
+        try {
+            if (!sidebar.matches(':popover-open')) sidebar.showPopover();
+            presetUsesPopover = true;
+            syncPresetSidebarState(true);
+            return;
+        } catch (_) {
+            // Keep the class-based panel working when Popover API setup is invalid.
+            presetUsesPopover = false;
+        }
+    }
+    syncPresetSidebarState(true);
+}
+
+function closePresetSidebar() {
+    const sidebar = getPresetElement('presetSidebar');
+    if (sidebar && typeof sidebar.hidePopover === 'function') {
+        try {
+            if (sidebar.matches(':popover-open')) sidebar.hidePopover();
+        } catch (_) {
+            // The fallback class state below remains usable.
+        }
+    }
+    syncPresetSidebarState(false);
+}
+
+// Kept as the HTML event contract for the preset trigger and close button.
+function togglePresetSidebar() {
+    const sidebar = getPresetElement('presetSidebar');
+    if (!sidebar) return;
+    if (isPresetSidebarOpen(sidebar)) {
+        closePresetSidebar();
+    } else {
+        openPresetSidebar();
+    }
+}
+
 async function loadPresetList() {
     try {
         const response = await fetch('/api/presets');
-        if (!response.ok) {
-            throw new Error('Failed to load presets');
-        }
+        if (!response.ok) throw new Error('Failed to load presets');
 
-        currentPresets = await response.json();
-        if (!currentPresets) {
-            currentPresets = [];
-        }
-        renderPresetList();
+        const presets = await response.json();
+        currentPresets = Array.isArray(presets) ? presets : [];
     } catch (error) {
         console.error('프리셋 목록 로드 실패:', error);
         currentPresets = [];
-        renderPresetList();
     }
+    renderPresetList();
 }
 
-// 프리셋 목록 렌더링
+function getPresetTags(preset) {
+    const tags = [];
+    if (preset.organize_strategy === 'date') tags.push('날짜별 정리');
+    if (preset.organize_strategy === 'event') tags.push('이벤트별 정리');
+    tags.push(preset.dedup_method === 'hash' ? '해시 중복 검사' : '이름+크기 검사');
+    if (preset.dry_run) tags.push('시뮬레이션');
+    if (preset.hash_verify) tags.push('해시 검증');
+    if (preset.ignore_state) tags.push('이전 기록 무시');
+    return tags;
+}
+
+function createPresetButton(action, presetName, label, title) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = `preset-card-btn ${action}`;
+    button.dataset.action = action;
+    button.dataset.preset = presetName;
+    button.title = title;
+    button.setAttribute('aria-label', title);
+    button.textContent = label;
+    return button;
+}
+
+function createPresetCard(preset) {
+    const card = document.createElement('article');
+    const presetName = typeof preset?.name === 'string' ? preset.name : '';
+    card.className = 'preset-card';
+    card.dataset.presetName = presetName;
+
+    const header = document.createElement('div');
+    header.className = 'preset-card-header';
+    const title = document.createElement('div');
+    title.className = 'preset-card-title';
+    title.textContent = presetName || '이름 없는 프리셋';
+    header.appendChild(title);
+
+    const actions = document.createElement('div');
+    actions.className = 'preset-card-actions';
+    actions.append(
+        createPresetButton('load', presetName, '↓', '프리셋 불러오기'),
+        createPresetButton('delete', presetName, '×', '프리셋 삭제')
+    );
+    header.appendChild(actions);
+    card.appendChild(header);
+
+    if (preset?.description) {
+        const description = document.createElement('div');
+        description.className = 'preset-card-description';
+        description.textContent = preset.description;
+        card.appendChild(description);
+    }
+
+    const tags = getPresetTags(preset || {});
+    if (tags.length > 0) {
+        const meta = document.createElement('div');
+        meta.className = 'preset-card-meta';
+        tags.forEach((tag) => {
+            const tagElement = document.createElement('span');
+            tagElement.className = 'preset-card-tag';
+            tagElement.textContent = tag;
+            meta.appendChild(tagElement);
+        });
+        card.appendChild(meta);
+    }
+    return card;
+}
+
 function renderPresetList() {
-    const presetList = document.getElementById('presetList');
+    const presetList = getPresetElement('presetList');
     if (!presetList) return;
 
-    if (!currentPresets || currentPresets.length === 0) {
-        presetList.innerHTML = '<p class="preset-empty-message">저장된 프리셋이 없습니다</p>';
+    presetList.replaceChildren();
+    if (currentPresets.length === 0) {
+        const empty = document.createElement('p');
+        empty.className = 'preset-empty-message';
+        empty.textContent = '저장된 프리셋이 없습니다';
+        presetList.appendChild(empty);
         return;
     }
-
-    presetList.innerHTML = currentPresets.map(preset => {
-        const tags = [];
-
-        // 분류 방식
-        if (preset.organize_strategy === 'date') {
-            tags.push('날짜별');
-        } else if (preset.organize_strategy === 'event') {
-            tags.push('이벤트별');
-        }
-
-        // 중복 검사 방식
-        if (preset.dedup_method === 'hash') {
-            tags.push('해시 검사');
-        } else {
-            tags.push('이름+크기');
-        }
-
-        // 드라이런
-        if (preset.dry_run) {
-            tags.push('드라이런');
-        }
-
-        // 이전 기록 무시
-        if (preset.ignore_state) {
-            tags.push('이전 기록 무시');
-        }
-
-        const escapedName = escapeHtml(preset.name);
-        const escapedDesc = escapeHtml(preset.description);
-        // Use data attributes and event delegation instead of inline onclick for better security
-        return `
-            <div class="preset-card" data-preset-name="${escapedName}">
-                <div class="preset-card-header">
-                    <div class="preset-card-title">${escapedName}</div>
-                    <div class="preset-card-actions">
-                        <button class="preset-card-btn load" data-action="load" data-preset="${escapedName}" title="불러오기">
-                            ↓
-                        </button>
-                        <button class="preset-card-btn delete" data-action="delete" data-preset="${escapedName}" title="삭제">
-                            ×
-                        </button>
-                    </div>
-                </div>
-                ${preset.description ? `<div class="preset-card-description">${escapedDesc}</div>` : ''}
-                <div class="preset-card-meta">
-                    ${tags.map(tag => `<span class="preset-card-tag">${escapeHtml(tag)}</span>`).join('')}
-                </div>
-            </div>
-        `;
-    }).join('');
+    currentPresets.forEach((preset) => presetList.appendChild(createPresetCard(preset)));
 }
 
-// 프리셋 불러오기 (이름으로)
+function setPresetFieldValue(id, value, fallback = '') {
+    const input = getPresetElement(id);
+    if (input) input.value = value ?? fallback;
+}
+
+function setPresetCheckboxValue(id, value) {
+    const input = getPresetElement(id);
+    if (input) input.checked = Boolean(value);
+}
+
 async function loadPresetByName(presetName) {
     try {
         const response = await fetch(`/api/presets/load?name=${encodeURIComponent(presetName)}`);
-        if (!response.ok) {
-            throw new Error('Failed to load preset');
-        }
+        if (!response.ok) throw new Error('Failed to load preset');
 
         const config = await response.json();
+        if (config.source) setPresetFieldValue('source', config.source);
+        if (config.dest) setPresetFieldValue('dest', config.dest);
+        setPresetFieldValue('organizeStrategy', config.organize_strategy, 'date');
+        setPresetFieldValue('eventName', config.event_name);
+        setPresetFieldValue('conflictPolicy', config.conflict_policy, 'skip');
+        setPresetFieldValue('dedupMethod', config.dedup_method, 'name-size');
+        setPresetFieldValue('dateFilterStart', config.date_filter_start);
+        setPresetFieldValue('dateFilterEnd', config.date_filter_end);
+        setPresetFieldValue('jobs', config.jobs ?? 0);
+        setPresetFieldValue('unclassifiedDir', config.unclassified_dir, 'unclassified');
+        setPresetFieldValue('quarantineDir', config.quarantine_dir, 'quarantine');
+        setPresetFieldValue('stateFile', config.state_file);
+        setPresetFieldValue('logFile', config.log_file);
+        setPresetCheckboxValue('dryRun', config.dry_run);
+        setPresetCheckboxValue('hashVerify', config.hash_verify);
+        setPresetCheckboxValue('ignoreState', config.ignore_state);
+        setPresetCheckboxValue('logJson', config.log_json);
 
-        // UI에 설정 적용
-        // 경로는 프리셋에 값이 있을 때만 적용 (기존 경로 유지)
-        if (config.source) {
-            document.getElementById('source').value = config.source;
-        }
-        if (config.dest) {
-            document.getElementById('dest').value = config.dest;
-        }
-        document.getElementById('organizeStrategy').value = config.organize_strategy || 'date';
-        document.getElementById('eventName').value = config.event_name || '';
-        document.getElementById('conflictPolicy').value = config.conflict_policy || 'skip';
-        document.getElementById('dedupMethod').value = config.dedup_method || 'name-size';
-        document.getElementById('dryRun').checked = config.dry_run || false;
-        document.getElementById('hashVerify').checked = config.hash_verify || false;
-        document.getElementById('ignoreState').checked = config.ignore_state || false;
-
-        // 확장자 태그 업데이트
-        if (config.include_extensions && typeof includeExtensions !== 'undefined') {
+        if (Array.isArray(config.include_extensions) && typeof includeExtensions !== 'undefined') {
             includeExtensions = config.include_extensions;
-            if (typeof renderExtensionTags === 'function') {
-                renderExtensionTags();
-            }
+            if (typeof renderExtensionTags === 'function') renderExtensionTags();
         }
+        if (typeof toggleEventNameInput === 'function') toggleEventNameInput();
+        if (typeof updateDateFilterButtons === 'function') updateDateFilterButtons();
+        if (typeof updateBookmarkButtons === 'function') updateBookmarkButtons();
+        // 프로그램적 값 대입은 change 이벤트를 내지 않으므로 실행 요약/버튼 라벨을 직접 갱신
+        if (typeof updateRunConfigurationSummary === 'function') updateRunConfigurationSummary();
+        if (typeof updateRunActionLabels === 'function') updateRunActionLabels();
 
-        // 이벤트명 입력 필드 표시/숨김
-        if (typeof toggleEventNameInput === 'function') {
-            toggleEventNameInput();
-        }
-
-        // 북마크 버튼 상태 업데이트
-        if (typeof updateBookmarkButtons === 'function') {
-            updateBookmarkButtons();
-        }
-
-        // 사이드바 닫기
-        togglePresetSidebar();
-
-        // 알림
+        closePresetSidebar();
         showNotification(`프리셋 "${presetName}"을 불러왔습니다`, 'success');
     } catch (error) {
         console.error('프리셋 로드 실패:', error);
@@ -150,189 +235,159 @@ async function loadPresetByName(presetName) {
     }
 }
 
-// 프리셋 저장 다이얼로그 표시
 function showSavePresetDialog() {
-    const dialog = document.getElementById('savePresetDialog');
-    if (dialog) {
+    const dialog = getPresetElement('savePresetDialog');
+    if (!dialog) return;
+
+    setPresetFieldValue('presetName');
+    setPresetFieldValue('presetDescription');
+    if (typeof dialog.showModal === 'function') {
+        try {
+            if (!dialog.open) dialog.showModal();
+        } catch (_) {
+            dialog.style.display = 'block';
+        }
+    } else {
         dialog.style.display = 'block';
-        document.getElementById('presetName').value = '';
-        document.getElementById('presetDescription').value = '';
-        document.getElementById('presetName').focus();
+        dialog.setAttribute('aria-hidden', 'false');
     }
+    getPresetElement('presetName')?.focus();
 }
 
-// 프리셋 저장 다이얼로그 숨김
 function hideSavePresetDialog() {
-    const dialog = document.getElementById('savePresetDialog');
-    if (dialog) {
+    const dialog = getPresetElement('savePresetDialog');
+    if (!dialog) return;
+
+    if (typeof dialog.close === 'function' && dialog.open) {
+        dialog.close();
+    } else {
         dialog.style.display = 'none';
+        dialog.setAttribute('aria-hidden', 'true');
     }
 }
 
-// 프리셋 저장
-async function savePreset() {
-    const name = document.getElementById('presetName').value.trim();
-    const description = document.getElementById('presetDescription').value.trim();
+function buildPresetConfig() {
+    const jobsValue = Number.parseInt(getPresetInputValue('jobs', '0'), 10);
+    return {
+        source: getPresetInputValue('source'),
+        dest: getPresetInputValue('dest'),
+        include_extensions: typeof includeExtensions !== 'undefined' ? includeExtensions : [],
+        jobs: Number.isNaN(jobsValue) ? 0 : jobsValue,
+        dedup_method: getPresetInputValue('dedupMethod', 'name-size'),
+        conflict_policy: getPresetInputValue('conflictPolicy', 'skip'),
+        organize_strategy: getPresetInputValue('organizeStrategy', 'date'),
+        event_name: getPresetInputValue('eventName'),
+        date_filter_start: getPresetInputValue('dateFilterStart'),
+        date_filter_end: getPresetInputValue('dateFilterEnd'),
+        unclassified_dir: getPresetInputValue('unclassifiedDir', 'unclassified') || 'unclassified',
+        quarantine_dir: getPresetInputValue('quarantineDir', 'quarantine') || 'quarantine',
+        state_file: getPresetInputValue('stateFile'),
+        log_file: getPresetInputValue('logFile'),
+        log_json: getPresetCheckboxValue('logJson'),
+        dry_run: getPresetCheckboxValue('dryRun'),
+        hash_verify: getPresetCheckboxValue('hashVerify'),
+        ignore_state: getPresetCheckboxValue('ignoreState')
+    };
+}
 
+async function savePreset() {
+    const name = getPresetInputValue('presetName').trim();
+    const description = getPresetInputValue('presetDescription').trim();
     if (!name) {
         showNotification('프리셋 이름을 입력해주세요', 'warning');
+        getPresetElement('presetName')?.focus();
         return;
     }
-
-    // 현재 설정 수집
-    const jobsInput = document.getElementById('jobs');
-    const jobsValue = jobsInput?.value;
-    const jobsParsed = parseInt(jobsValue);
-
-    const config = {
-        source: document.getElementById('source').value,
-        dest: document.getElementById('dest').value,
-        include_extensions: typeof includeExtensions !== 'undefined' ? includeExtensions : [],
-        jobs: isNaN(jobsParsed) ? 0 : jobsParsed,
-        dedup_method: document.getElementById('dedupMethod').value,
-        conflict_policy: document.getElementById('conflictPolicy').value,
-        organize_strategy: document.getElementById('organizeStrategy').value,
-        event_name: document.getElementById('eventName').value,
-        unclassified_dir: 'unclassified',
-        quarantine_dir: 'quarantine',
-        dry_run: document.getElementById('dryRun').checked,
-        hash_verify: document.getElementById('hashVerify').checked,
-        ignore_state: document.getElementById('ignoreState').checked
-    };
 
     try {
         const response = await fetch('/api/presets', {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-                name: name,
-                description: description,
-                config: config
-            })
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name, description, config: buildPresetConfig() })
         });
-
-        if (!response.ok) {
-            throw new Error('Failed to save preset');
-        }
+        if (!response.ok) throw new Error('Failed to save preset');
 
         showNotification(`프리셋 "${name}"을 저장했습니다`, 'success');
         hideSavePresetDialog();
-        loadPresetList(); // 목록 새로고침
+        loadPresetList();
     } catch (error) {
         console.error('프리셋 저장 실패:', error);
         showNotification('프리셋 저장에 실패했습니다', 'error');
     }
 }
 
-// 프리셋 삭제 (이름으로)
 async function deletePresetByName(presetName) {
-    if (!confirm(`"${presetName}" 프리셋을 정말 삭제하시겠습니까?`)) {
-        return;
-    }
-
+    if (!confirm(`"${presetName}" 프리셋을 정말 삭제하시겠습니까?`)) return;
     try {
         const response = await fetch(`/api/presets/delete?name=${encodeURIComponent(presetName)}`, {
             method: 'DELETE'
         });
-
-        if (!response.ok) {
-            throw new Error('Failed to delete preset');
-        }
+        if (!response.ok) throw new Error('Failed to delete preset');
 
         showNotification(`프리셋 "${presetName}"을 삭제했습니다`, 'success');
-        loadPresetList(); // 목록 새로고침
+        loadPresetList();
     } catch (error) {
         console.error('프리셋 삭제 실패:', error);
         showNotification('프리셋 삭제에 실패했습니다', 'error');
     }
 }
 
-// 알림 표시 (간단한 토스트)
 function showNotification(message, type = 'info') {
-    // 기존 알림 제거
     const existing = document.querySelector('.preset-notification');
-    if (existing) {
-        existing.remove();
-    }
+    if (existing) existing.remove();
 
-    // 새 알림 생성
     const notification = document.createElement('div');
     notification.className = `preset-notification preset-notification-${type}`;
     notification.textContent = message;
-
-    // 스타일
-    Object.assign(notification.style, {
-        position: 'fixed',
-        bottom: '24px',
-        right: '24px',
-        padding: '16px 24px',
-        borderRadius: '12px',
-        background: type === 'success' ? '#10b981' : type === 'error' ? '#ef4444' : type === 'warning' ? '#f59e0b' : '#6366f1',
-        color: 'white',
-        fontSize: '15px',
-        fontWeight: '600',
-        boxShadow: '0 10px 25px rgba(0, 0, 0, 0.2)',
-        zIndex: '9999',
-        animation: 'slideInRight 0.3s ease',
-        maxWidth: '400px'
-    });
-
+    notification.setAttribute('role', 'status');
     document.body.appendChild(notification);
 
-    // 3초 후 제거
-    setTimeout(() => {
-        notification.style.animation = 'slideOutRight 0.3s ease';
-        setTimeout(() => notification.remove(), 300);
-    }, 3000);
+    setTimeout(() => notification.remove(), 3000);
 }
 
-// 애니메이션 CSS 추가
-const style = document.createElement('style');
-style.textContent = `
-    @keyframes slideInRight {
-        from {
-            transform: translateX(400px);
-            opacity: 0;
-        }
-        to {
-            transform: translateX(0);
-            opacity: 1;
-        }
-    }
-    @keyframes slideOutRight {
-        from {
-            transform: translateX(0);
-            opacity: 1;
-        }
-        to {
-            transform: translateX(400px);
-            opacity: 0;
-        }
-    }
-`;
-document.head.appendChild(style);
+function initPresetPanel() {
+    const sidebar = getPresetElement('presetSidebar');
+    const presetList = getPresetElement('presetList');
+    const dialog = getPresetElement('savePresetDialog');
+    const backdrop = getPresetElement('presetBackdrop');
 
-// 페이지 로드 시 프리셋 목록 로드
-window.addEventListener('DOMContentLoaded', () => {
     loadPresetList();
+    syncPresetSidebarState(isPresetSidebarOpen(sidebar));
 
-    // Event delegation for preset card buttons
-    const presetList = document.getElementById('presetList');
-    if (presetList) {
-        presetList.addEventListener('click', (e) => {
-            const btn = e.target.closest('.preset-card-btn');
-            if (!btn) return;
-
-            const action = btn.dataset.action;
-            const presetName = btn.dataset.preset;
-
-            if (action === 'load') {
-                loadPresetByName(presetName);
-            } else if (action === 'delete') {
-                deletePresetByName(presetName);
-            }
+    if (sidebar) {
+        sidebar.addEventListener('toggle', () => {
+            presetUsesPopover = typeof sidebar.showPopover === 'function';
+            syncPresetSidebarState(isPresetSidebarOpen(sidebar));
         });
     }
-});
+    if (dialog) {
+        dialog.addEventListener('close', () => {
+            dialog.style.display = '';
+        });
+    }
+    if (presetList) {
+        presetList.addEventListener('click', (event) => {
+            const button = event.target.closest('.preset-card-btn');
+            if (!button) return;
+            if (button.dataset.action === 'load') loadPresetByName(button.dataset.preset);
+            if (button.dataset.action === 'delete') deletePresetByName(button.dataset.preset);
+        });
+    }
+    if (backdrop) backdrop.addEventListener('click', closePresetSidebar);
+
+    document.addEventListener('click', (event) => {
+        if (!sidebar || !isPresetSidebarOpen(sidebar)) return;
+        if (sidebar.contains(event.target)) return;
+        if ([...getPresetToggleButtons()].some((button) => button.contains(event.target))) return;
+        closePresetSidebar();
+    });
+    document.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape' && isPresetSidebarOpen(sidebar)) closePresetSidebar();
+    });
+}
+
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initPresetPanel);
+} else {
+    initPresetPanel();
+}

@@ -129,6 +129,74 @@ type RunSummary struct {
 	Warnings []string
 }
 
+// RunKind identifies which operation owns the shared run lifecycle.
+type RunKind string
+
+const (
+	RunKindBackup RunKind = "backup"
+	RunKindVerify RunKind = "verify"
+)
+
+// VerifyMode controls how source files are matched against the destination.
+type VerifyMode string
+
+const (
+	VerifyModeQuick VerifyMode = "quick"
+	VerifyModeHash  VerifyMode = "hash"
+)
+
+// VerifyVerdict is the result of comparing one source file.
+type VerifyVerdict string
+
+const (
+	VerifyVerdictOK           VerifyVerdict = "ok"
+	VerifyVerdictMissing      VerifyVerdict = "missing"
+	VerifyVerdictMismatch     VerifyVerdict = "mismatch"
+	VerifyVerdictUnverifiable VerifyVerdict = "unverifiable"
+)
+
+// VerifyProblem is the bounded, client-facing representation of a problem
+// found during verification. The server keeps the complete requeue data
+// separately from this preview.
+type VerifyProblem struct {
+	Verdict    VerifyVerdict `json:"verdict"`
+	SourcePath string        `json:"source_path"`
+	Name       string        `json:"name"`
+	Size       int64         `json:"size"`
+	Reason     string        `json:"reason"`
+}
+
+// HashManifestSummary describes an uploaded GNU sha256sum manifest.
+type HashManifestSummary struct {
+	Filename    string `json:"filename"`
+	Entries     int    `json:"entries"`
+	ParseErrors int    `json:"parse_errors"`
+}
+
+// VerifySummary contains the terminal snapshot for a verification run.
+type VerifySummary struct {
+	Mode               VerifyMode           `json:"mode"`
+	Source             string               `json:"source"`
+	Dest               string               `json:"dest"`
+	SourceFiles        int                  `json:"source_files"`
+	SourceBytes        int64                `json:"source_bytes"`
+	Normal             int                  `json:"normal"`
+	Missing            int                  `json:"missing"`
+	Mismatch           int                  `json:"mismatch"`
+	Unverifiable       int                  `json:"unverifiable"`
+	ProblemCount       int                  `json:"problem_count"`
+	Problems           []VerifyProblem      `json:"problems,omitempty"`
+	ProblemsTruncated  bool                 `json:"problems_truncated,omitempty"`
+	Warnings           []string             `json:"warnings,omitempty"`
+	Manifest           *HashManifestSummary `json:"manifest,omitempty"`
+	IncompleteManifest bool                 `json:"incomplete_manifest,omitempty"`
+	RequeueAllowed     bool                 `json:"requeue_allowed"`
+	RequeueEligible    int                  `json:"requeue_eligible"`
+	StartTime          time.Time            `json:"start_time"`
+	EndTime            time.Time            `json:"end_time"`
+	Duration           time.Duration        `json:"duration"`
+}
+
 // ConfigPreset represents a saved configuration preset.
 type ConfigPreset struct {
 	Name              string           `json:"name"`
@@ -218,11 +286,13 @@ type BackupConfig struct {
 
 // BackupHistoryEntry represents a single backup session record.
 type BackupHistoryEntry struct {
-	ID        string       `json:"id"`
-	Summary   RunSummary   `json:"summary"`
-	Config    BackupConfig `json:"config"`
-	Status    BackupStatus `json:"status"`
-	CreatedAt time.Time    `json:"created_at"`
+	ID            string         `json:"id"`
+	Kind          RunKind        `json:"kind,omitempty"`
+	Summary       RunSummary     `json:"summary"`
+	VerifySummary *VerifySummary `json:"verify_summary,omitempty"`
+	Config        BackupConfig   `json:"config"`
+	Status        BackupStatus   `json:"status"`
+	CreatedAt     time.Time      `json:"created_at"`
 }
 
 // BackupHistory stores the collection of backup history entries.

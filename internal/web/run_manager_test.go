@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/On-Jun9/ShutterPipe/pkg/types"
 )
@@ -203,5 +204,66 @@ func TestRunManagerNeverReusesRunIDWithinServerLifetime(t *testing.T) {
 	}
 	if _, err := manager.TryStart("bounded-run-0", func() {}); !errors.Is(err, ErrRunIDReused) {
 		t.Fatalf("oldest run ID became reusable: %v", err)
+	}
+}
+
+func TestRunManagerRetainsVerificationKindAndDeepClonedSummary(t *testing.T) {
+	manager := NewRunManager()
+	if _, err := manager.TryStartKind("verify-run", types.RunKindVerify, func() {}); err != nil {
+		t.Fatal(err)
+	}
+	summary := &types.VerifySummary{
+		Mode: types.VerifyModeHash,
+		Problems: []types.VerifyProblem{{
+			Name: "photo.jpg", Verdict: types.VerifyVerdictMissing,
+		}},
+		Warnings: []string{"warning"},
+		Manifest: &types.HashManifestSummary{Filename: "hashes.txt", Entries: 1},
+	}
+	terminal, finished := manager.FinishDetailed("verify-run", RunStatusComplete, nil, summary, "")
+	if !finished || terminal.Kind != types.RunKindVerify || terminal.VerifySummary == nil {
+		t.Fatalf("unexpected terminal snapshot: %+v", terminal)
+	}
+
+	summary.Problems[0].Name = "mutated.jpg"
+	summary.Warnings[0] = "mutated"
+	summary.Manifest.Filename = "mutated.txt"
+	retained := manager.StatusFor("verify-run")
+	if retained.VerifySummary.Problems[0].Name != "photo.jpg" ||
+		retained.VerifySummary.Warnings[0] != "warning" ||
+		retained.VerifySummary.Manifest.Filename != "hashes.txt" {
+		t.Fatalf("retained verify summary was mutated: %+v", retained.VerifySummary)
+	}
+}
+
+func TestRunManagerMutationLeaseRejectsRunsAndParticipatesInWait(t *testing.T) {
+	manager := NewRunManager()
+	release, err := manager.TryBeginMutation()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !manager.IsActive() {
+		t.Fatal("mutation lease was not included in activity checks")
+	}
+	if _, err := manager.TryStart("run-during-mutation", func() {}); !errors.Is(err, ErrRunAlreadyActive) {
+		t.Fatalf("run was admitted during mutation: %v", err)
+	}
+
+	waitDone := make(chan error, 1)
+	go func() {
+		waitDone <- manager.Wait(context.Background())
+	}()
+	select {
+	case <-waitDone:
+		t.Fatal("Wait returned before mutation release")
+	case <-time.After(20 * time.Millisecond):
+	}
+	release()
+	release()
+	if err := <-waitDone; err != nil {
+		t.Fatal(err)
+	}
+	if manager.IsActive() {
+		t.Fatal("mutation lease stayed active after release")
 	}
 }

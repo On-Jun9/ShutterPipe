@@ -17,7 +17,14 @@ var videoExtensions = map[string]bool{
 
 type Scanner struct {
 	includeExt map[string]bool
+	includeAll bool
 	entryInfo  func(os.DirEntry) (os.FileInfo, error)
+}
+
+type ScanIssue struct {
+	Path  string
+	IsDir bool
+	Err   error
 }
 
 func New(extensions []string) *Scanner {
@@ -27,6 +34,16 @@ func New(extensions []string) *Scanner {
 	}
 	return &Scanner{
 		includeExt: extMap,
+		entryInfo:  func(entry os.DirEntry) (os.FileInfo, error) { return entry.Info() },
+	}
+}
+
+// NewAll creates a scanner for every regular file below a destination root.
+// It is intentionally separate from New so backup source filtering keeps its
+// existing behavior.
+func NewAll() *Scanner {
+	return &Scanner{
+		includeAll: true,
 		entryInfo:  func(entry os.DirEntry) (os.FileInfo, error) { return entry.Info() },
 	}
 }
@@ -68,6 +85,10 @@ func (s *Scanner) ScanWithContext(ctx context.Context, root string) ([]types.Fil
 		if err != nil {
 			return fmt.Errorf("failed to inspect source file %s: %w", path, err)
 		}
+		// 심볼릭 링크·FIFO 등 비정규 파일은 백업/검증 대상이 아니다.
+		if !info.Mode().IsRegular() {
+			return nil
+		}
 
 		entries = append(entries, types.FileEntry{
 			Path:      path,
@@ -82,4 +103,70 @@ func (s *Scanner) ScanWithContext(ctx context.Context, root string) ([]types.Fil
 	})
 
 	return entries, err
+}
+
+// ScanCollectingWithContext keeps walking after an individual entry or
+// subtree cannot be inspected. A failure at the root and context termination
+// remain fatal because no meaningful partial scan can be established.
+func (s *Scanner) ScanCollectingWithContext(ctx context.Context, root string) ([]types.FileEntry, []ScanIssue, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	var entries []types.FileEntry
+	var issues []ScanIssue
+	cleanRoot := filepath.Clean(root)
+
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, walkErr error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if walkErr != nil {
+			if filepath.Clean(path) == cleanRoot {
+				return walkErr
+			}
+			issue := ScanIssue{Path: path, Err: walkErr}
+			if d != nil {
+				issue.IsDir = d.IsDir()
+			}
+			issues = append(issues, issue)
+			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
+
+		ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(path)), ".")
+		if !s.includeAll && !s.includeExt[ext] {
+			return nil
+		}
+
+		entryInfo := s.entryInfo
+		if entryInfo == nil {
+			entryInfo = func(entry os.DirEntry) (os.FileInfo, error) { return entry.Info() }
+		}
+		info, infoErr := entryInfo(d)
+		if infoErr != nil {
+			issues = append(issues, ScanIssue{Path: path, Err: infoErr})
+			return nil
+		}
+		// 심볼릭 링크·FIFO 등 비정규 파일은 백업/검증 대상이 아니다. 원본 스캔에
+		// 포함되면 링크 자체 크기와 열었을 때의 대상 파일 크기가 달라 매 검증마다
+		// 오판정되고 재백업이 반복된다.
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+
+		entries = append(entries, types.FileEntry{
+			Path:      path,
+			Name:      d.Name(),
+			Size:      info.Size(),
+			ModTime:   info.ModTime(),
+			Extension: ext,
+			IsVideo:   videoExtensions[ext],
+		})
+		return nil
+	})
+
+	return entries, issues, err
 }

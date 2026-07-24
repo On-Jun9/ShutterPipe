@@ -143,6 +143,14 @@ async function loadSettings() {
     if (typeof updateBookmarkButtons === 'function') {
         updateBookmarkButtons();
     }
+
+    // 프로그램적 값 대입은 change 이벤트를 내지 않으므로 실행 요약/버튼 라벨을 직접 갱신
+    if (typeof updateRunConfigurationSummary === 'function') {
+        updateRunConfigurationSummary();
+    }
+    if (typeof updateRunActionLabels === 'function') {
+        updateRunActionLabels();
+    }
 }
 
 // 설정 저장
@@ -236,28 +244,28 @@ function markPathErrors(field, errorMessage) {
 
 // Disable backup button
 function disableBackupButton() {
-    const startBtn = document.getElementById('startBtn');
-    if (startBtn) {
-        startBtn.disabled = true;
-        startBtn.title = '설정에 오류가 있습니다';
-    }
+    ['startBtn', 'verifyBtn'].forEach((id) => {
+        const button = document.getElementById(id);
+        if (!button) return;
+        button.disabled = true;
+        button.title = '설정에 오류가 있습니다';
+    });
 }
 
 // Enable backup button (only if paths are valid)
 function enableBackupButton() {
     const startBtn = document.getElementById('startBtn');
-    if (startBtn && !isRunning) {
+    const verifyBtn = document.getElementById('verifyBtn');
+    if (!isRunning) {
         // Check if both source and dest are valid before enabling
         const sourceValid = !validatePath(document.getElementById('source').value);
         const destValid = !validatePath(document.getElementById('dest').value);
 
-        if (sourceValid && destValid) {
-            startBtn.disabled = false;
-            startBtn.title = '';
-        } else {
-            startBtn.disabled = true;
-            startBtn.title = '설정에 오류가 있습니다';
-        }
+        [startBtn, verifyBtn].forEach((button) => {
+            if (!button) return;
+            button.disabled = !(sourceValid && destValid);
+            button.title = sourceValid && destValid ? '' : '설정에 오류가 있습니다';
+        });
     }
 }
 
@@ -266,11 +274,7 @@ function toggleEventNameInput() {
     const strategy = document.getElementById('organizeStrategy').value;
     const eventNameContainer = document.getElementById('eventNameContainer');
 
-    if (strategy === 'event') {
-        eventNameContainer.style.display = 'block';
-    } else {
-        eventNameContainer.style.display = 'none';
-    }
+    eventNameContainer.hidden = strategy !== 'event';
 }
 
 // 날짜 필터 설정 (빠른 선택)
@@ -358,3 +362,9 @@ window.addEventListener('DOMContentLoaded', () => {
         destInput.addEventListener('blur', () => validateField('dest'));
     }
 });
+
+// 고급 설정 모달
+function openAdvancedSettingsDialog() {
+    const dialog = document.getElementById('advancedSettingsDialog');
+    if (dialog && typeof dialog.showModal === 'function') dialog.showModal();
+}

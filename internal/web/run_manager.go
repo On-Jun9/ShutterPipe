@@ -21,23 +21,26 @@ const (
 
 var (
 	ErrNoActiveRun      = errors.New("backup is not running")
-	ErrRunAlreadyActive = errors.New("backup already running")
+	ErrRunAlreadyActive = errors.New("another operation is already running")
 	ErrRunIDReused      = errors.New("run_id has already been used")
 	ErrRunIDRequired    = errors.New("run_id is required")
 	ErrRunIDMismatch    = errors.New("backup run ID does not match the active run")
 )
 
 type RunStatusResponse struct {
-	Status   RunStatus         `json:"status"`
-	RunID    string            `json:"run_id,omitempty"`
-	ServerID string            `json:"server_id,omitempty"`
-	Summary  *types.RunSummary `json:"summary,omitempty"`
-	Error    string            `json:"error,omitempty"`
-	Revision uint64            `json:"revision"`
+	Status        RunStatus            `json:"status"`
+	Kind          types.RunKind        `json:"kind,omitempty"`
+	RunID         string               `json:"run_id,omitempty"`
+	ServerID      string               `json:"server_id,omitempty"`
+	Summary       *types.RunSummary    `json:"summary,omitempty"`
+	VerifySummary *types.VerifySummary `json:"verify_summary,omitempty"`
+	Error         string               `json:"error,omitempty"`
+	Revision      uint64               `json:"revision"`
 }
 
 type activeRun struct {
 	id       string
+	kind     types.RunKind
 	status   RunStatus
 	cancel   func()
 	done     chan struct{}
@@ -51,6 +54,7 @@ type RunManager struct {
 	terminals     map[string]RunStatusResponse
 	terminalOrder []string
 	revision      uint64
+	mutationDone  chan struct{}
 	// usedIDs deliberately grows for the server's lifetime. Evicting old IDs
 	// would let a reused run_id match a delayed cancel from the evicted run.
 	// Runs are user-initiated and an ID is ~tens of bytes, so unbounded growth
@@ -73,10 +77,17 @@ func (m *RunManager) Start(runID string, cancel func()) bool {
 }
 
 func (m *RunManager) TryStart(runID string, cancel func()) (RunStatusResponse, error) {
+	return m.TryStartKind(runID, types.RunKindBackup, cancel)
+}
+
+func (m *RunManager) TryStartKind(runID string, kind types.RunKind, cancel func()) (RunStatusResponse, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.active != nil {
+	if m.active != nil || m.mutationDone != nil {
 		return m.statusLocked(), ErrRunAlreadyActive
+	}
+	if kind == "" {
+		kind = types.RunKindBackup
 	}
 	if m.usedIDs == nil {
 		m.usedIDs = make(map[string]struct{})
@@ -87,7 +98,7 @@ func (m *RunManager) TryStart(runID string, cancel func()) (RunStatusResponse, e
 	m.usedIDs[runID] = struct{}{}
 	m.revision++
 	m.active = &activeRun{
-		id: runID, status: RunStatusRunning, cancel: cancel,
+		id: runID, kind: kind, status: RunStatusRunning, cancel: cancel,
 		done: make(chan struct{}), revision: m.revision,
 	}
 	return m.statusLocked(), nil
@@ -120,7 +131,7 @@ func (m *RunManager) StatusFor(runID string) RunStatusResponse {
 func (m *RunManager) IsActive() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.active != nil
+	return m.active != nil || m.mutationDone != nil
 }
 
 func (m *RunManager) Cancel(runID string) (RunStatusResponse, error) {
@@ -157,6 +168,10 @@ func (m *RunManager) Cancel(runID string) (RunStatusResponse, error) {
 }
 
 func (m *RunManager) Finish(runID string, status RunStatus, summary *types.RunSummary, errMessage string) (RunStatusResponse, bool) {
+	return m.FinishDetailed(runID, status, summary, nil, errMessage)
+}
+
+func (m *RunManager) FinishDetailed(runID string, status RunStatus, summary *types.RunSummary, verifySummary *types.VerifySummary, errMessage string) (RunStatusResponse, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.active == nil || m.active.id != runID {
@@ -167,8 +182,10 @@ func (m *RunManager) Finish(runID string, status RunStatus, summary *types.RunSu
 	}
 	m.revision++
 	summary = cloneRunSummary(summary)
+	verifySummary = cloneVerifySummary(verifySummary)
 	terminal := RunStatusResponse{
-		Status: status, RunID: runID, Summary: summary,
+		Status: status, Kind: m.active.kind, RunID: runID,
+		Summary: summary, VerifySummary: verifySummary,
 		Error: errMessage, Revision: m.revision,
 	}
 	close(m.active.done)
@@ -199,11 +216,16 @@ func (m *RunManager) CancelActive() {
 
 func (m *RunManager) Wait(ctx context.Context) error {
 	m.mu.Lock()
-	if m.active == nil {
+	var done <-chan struct{}
+	if m.active != nil {
+		done = m.active.done
+	} else if m.mutationDone != nil {
+		done = m.mutationDone
+	}
+	if done == nil {
 		m.mu.Unlock()
 		return nil
 	}
-	done := m.active.done
 	m.mu.Unlock()
 
 	select {
@@ -225,7 +247,35 @@ func (m *RunManager) statusLocked() RunStatusResponse {
 }
 
 func (m *RunManager) activeStatusLocked() RunStatusResponse {
-	return RunStatusResponse{Status: m.active.status, RunID: m.active.id, Revision: m.active.revision}
+	return RunStatusResponse{
+		Status: m.active.status, Kind: m.active.kind,
+		RunID: m.active.id, Revision: m.active.revision,
+	}
+}
+
+// TryBeginMutation reserves the shared run lifecycle for a synchronous state
+// mutation such as verify requeue without exposing it as a user-visible run.
+func (m *RunManager) TryBeginMutation() (func(), error) {
+	m.mu.Lock()
+	if m.active != nil || m.mutationDone != nil {
+		m.mu.Unlock()
+		return nil, ErrRunAlreadyActive
+	}
+	done := make(chan struct{})
+	m.mutationDone = done
+	m.mu.Unlock()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			m.mu.Lock()
+			if m.mutationDone == done {
+				m.mutationDone = nil
+				close(done)
+			}
+			m.mu.Unlock()
+		})
+	}, nil
 }
 
 func (m *RunManager) retainTerminalLocked(terminal RunStatusResponse) {
@@ -258,5 +308,20 @@ func cloneRunSummary(summary *types.RunSummary) *types.RunSummary {
 
 func cloneRunStatusResponse(status RunStatusResponse) RunStatusResponse {
 	status.Summary = cloneRunSummary(status.Summary)
+	status.VerifySummary = cloneVerifySummary(status.VerifySummary)
 	return status
+}
+
+func cloneVerifySummary(summary *types.VerifySummary) *types.VerifySummary {
+	if summary == nil {
+		return nil
+	}
+	cloned := *summary
+	cloned.Problems = append([]types.VerifyProblem(nil), summary.Problems...)
+	cloned.Warnings = append([]string(nil), summary.Warnings...)
+	if summary.Manifest != nil {
+		manifest := *summary.Manifest
+		cloned.Manifest = &manifest
+	}
+	return &cloned
 }
