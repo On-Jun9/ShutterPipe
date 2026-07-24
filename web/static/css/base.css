@@ -12,8 +12,7 @@
   :where(button, input, select, textarea, summary, a):focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
   :where(button, input, select, textarea):disabled { cursor: not-allowed; opacity: .5; }
   .tab-radio, .seg-radio { position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip-path: inset(50%); }
-  .mono, code, .input-path, .progress-text, .progress-percent, .progress-readout, .run-configuration-summary, .summary-value, .history-path, .stat-value { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
-  .fade-in { animation: none; }
+  code, .input-path, .progress-text, .progress-percent, .progress-readout, .run-configuration-summary, .summary-value, .history-path, .stat-value { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
   :root.theme-switching *, :root.theme-switching *::before, :root.theme-switching *::after { transition: none !important; }
 }
 
@@ -25,11 +24,11 @@
   .select-modern { appearance: auto; }
   .input-path { font-size: 13px; }
 
-  .btn-primary, .btn-success { display: inline-flex; align-items: center; justify-content: center; gap: var(--space-2); min-block-size: 44px; max-inline-size: 100%; padding: 11px 21px; border: 0; border-radius: var(--radius-pill); background: var(--accent-fill, var(--accent)); color: #fff; font-size: 15px; font-weight: 600; letter-spacing: -.01em; line-height: 1.25; cursor: pointer; transition: background-color var(--motion-fast); }
-  .btn-primary:hover, .btn-success:hover { background: var(--accent-fill-hover, var(--accent-strong)); }
+  .btn-primary { display: inline-flex; align-items: center; justify-content: center; gap: var(--space-2); min-block-size: 44px; max-inline-size: 100%; padding: 11px 21px; border: 0; border-radius: var(--radius-pill); background: var(--accent-fill, var(--accent)); color: #fff; font-size: 15px; font-weight: 600; letter-spacing: -.01em; line-height: 1.25; cursor: pointer; transition: background-color var(--motion-fast); }
+  .btn-primary:hover { background: var(--accent-fill-hover, var(--accent-strong)); }
   /* 보조 버튼은 어떤 배경 위에서든 항상 surface 배경으로 동일하게 보인다 */
-  .btn-secondary, .btn-small, .btn-action { display: inline-flex; align-items: center; justify-content: center; gap: var(--space-2); min-block-size: 36px; max-inline-size: 100%; padding: 7px 14px; border: 1px solid var(--border-strong); border-radius: var(--radius-m); background: var(--surface); color: var(--text); font-size: 13px; font-weight: 500; line-height: 1.25; cursor: pointer; transition: background-color var(--motion-fast), border-color var(--motion-fast); }
-  .btn-secondary:hover, .btn-small:hover, .btn-action:hover { background: var(--inset); }
+  .btn-secondary, .btn-small { display: inline-flex; align-items: center; justify-content: center; gap: var(--space-2); min-block-size: 36px; max-inline-size: 100%; padding: 7px 14px; border: 1px solid var(--border-strong); border-radius: var(--radius-m); background: var(--surface); color: var(--text); font-size: 13px; font-weight: 500; line-height: 1.25; cursor: pointer; transition: background-color var(--motion-fast), border-color var(--motion-fast); }
+  .btn-secondary:hover, .btn-small:hover { background: var(--inset); }
   .btn-danger { display: inline-flex; align-items: center; justify-content: center; min-block-size: 44px; padding: 11px 21px; border: 1px solid color-mix(in srgb, var(--danger) 55%, var(--border)); border-radius: var(--radius-pill); background: transparent; color: var(--danger); font-size: 15px; font-weight: 600; cursor: pointer; transition: background-color var(--motion-fast); }
   .btn-danger:hover { background: color-mix(in srgb, var(--danger) 8%, transparent); }
   .btn-small { min-block-size: 32px; padding: 5px 10px; font-size: 12.5px; }

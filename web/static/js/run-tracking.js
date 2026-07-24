@@ -66,6 +66,11 @@ function createRunId() {
 }
 
 function beginTrackingRun(runId, status = 'running', kind = null) {
+    // 다른 실행을 채택할 때 이전 실행의 파일 목록/요약이 새 실행과 섞이지 않게 비운다.
+    if (runId && runId !== resultsRunId) {
+        if (typeof resetRunResultsView === 'function') resetRunResultsView();
+        resultsRunId = runId;
+    }
     currentRunId = runId;
     currentRunKind = kind || currentRunKind || 'backup';
     terminalRunId = null;

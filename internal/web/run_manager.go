@@ -21,7 +21,7 @@ const (
 
 var (
 	ErrNoActiveRun      = errors.New("backup is not running")
-	ErrRunAlreadyActive = errors.New("backup already running")
+	ErrRunAlreadyActive = errors.New("another operation is already running")
 	ErrRunIDReused      = errors.New("run_id has already been used")
 	ErrRunIDRequired    = errors.New("run_id is required")
 	ErrRunIDMismatch    = errors.New("backup run ID does not match the active run")

@@ -147,7 +147,7 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.runs().IsActive() {
-		writeAPIError(w, http.StatusConflict, "backup already running")
+		writeAPIError(w, http.StatusConflict, "another operation is already running")
 		return
 	}
 

@@ -1,6 +1,16 @@
 // Run Results Module
 // 실행 결과 렌더링: 파일 처리 목록, 백업 완료 요약
 
+// 새 실행 채택 시 이전 실행의 결과 표시를 비운다 (beginTrackingRun에서 호출)
+function resetRunResultsView() {
+    const fileList = document.getElementById('fileList');
+    if (fileList) {
+        fileList.innerHTML = '<p class="file-list-placeholder">파일 처리 목록이 여기에 표시됩니다...</p>';
+    }
+    setElementHidden(document.getElementById('summarySection'), true);
+    setElementHidden(document.getElementById('runNextActions'), true);
+}
+
 function addFileToList(filename, action) {
     const fileList = document.getElementById('fileList');
 

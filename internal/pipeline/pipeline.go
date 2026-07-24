@@ -25,7 +25,7 @@ import (
 var (
 	ErrRunCanceled      = errors.New("backup run canceled")
 	ErrRunFailed        = errors.New("backup run completed with file failures")
-	ErrRunAlreadyActive = errors.New("another backup run is already active")
+	ErrRunAlreadyActive = errors.New("another operation is already running")
 )
 
 type metadataExtractor interface {

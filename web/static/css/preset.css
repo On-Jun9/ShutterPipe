@@ -28,10 +28,9 @@
   .preset-save-dialog h3 { font-size: 15px; font-weight: 600; }
   .preset-form-group { display: grid; gap: var(--space-1); }
   .preset-form-group label { color: var(--text-2); font-size: 13px; font-weight: 600; }
-  .preset-form-actions, .preset-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+  .preset-form-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
   .preset-form-actions > button { flex: 1 1 0; min-block-size: 44px; border-radius: var(--radius-pill); }
-  .preset-actions { padding-top: var(--space-3); border-top: 1px solid var(--border); }
-  .preset-notification { border: 1px solid var(--border-strong); border-radius: var(--radius-m) !important; box-shadow: var(--overlay-shadow) !important; font-family: var(--font-ui); }
+  .preset-notification { position: fixed; inset-block-end: var(--space-6); inset-inline-end: var(--space-6); z-index: 100; max-inline-size: min(400px, calc(100vw - 32px)); padding: var(--space-4) var(--space-6); border: 1px solid var(--border-strong); border-radius: var(--radius-m) !important; box-shadow: var(--overlay-shadow) !important; color: #fff; font-family: var(--font-ui); font-size: 15px; font-weight: 600; }
   .preset-notification-success { background: var(--success) !important; } .preset-notification-warning { background: var(--warning) !important; } .preset-notification-error { background: var(--danger) !important; } .preset-notification-info { background: var(--text-2) !important; }
   @media (max-width: 640px) { .preset-sidebar { inset: var(--space-2) var(--space-2) auto; inline-size: auto; max-block-size: calc(100vh - 16px); } }
 }

@@ -108,6 +108,9 @@
   .progress-readout:empty { display: none; }
   .progress-readout-header { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); margin-block-end: var(--space-2); }
   .run-inline-error { margin-block-start: var(--space-4); padding: var(--space-3) var(--space-4); border: 1px solid color-mix(in srgb, var(--danger) 35%, var(--border)); border-radius: var(--radius-m); background: color-mix(in srgb, var(--danger) 6%, var(--surface)); color: var(--danger); font-size: 13px; font-weight: 500; }
+  .run-inline-error[data-message-type="warning"] { border-color: color-mix(in srgb, var(--warning) 45%, var(--border)); background: color-mix(in srgb, var(--warning) 8%, var(--surface)); color: color-mix(in srgb, var(--warning) 80%, var(--text)); }
+  /* 실행 중 잠긴 폼(inert)은 흐리게 표시해 입력 불가 상태를 드러낸다 */
+  .backup-workflow.is-running, .backup-workflow.is-cancelling { opacity: .55; }
   .run-log-controls { display: grid; gap: var(--space-2); margin-block-start: var(--space-4); }
   .run-log-actions, .summary-actions, .run-next-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
   .run-log-actions .log-toggle { flex: 1; justify-content: space-between; }
