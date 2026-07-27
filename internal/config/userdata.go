@@ -71,6 +71,32 @@ func validatePath(path string) error {
 	return nil
 }
 
+// writeFileAtomic writes data through a temp file in the same directory and
+// renames it into place. The temp name must be unique per call: a shared
+// "<name>.tmp" lets concurrent writers truncate each other's file, so one
+// writer renames a partially overwritten file and the other fails with ENOENT.
+func writeFileAtomic(filename string, data []byte) error {
+	dir := filepath.Dir(filename)
+	temp, err := os.CreateTemp(dir, "."+filepath.Base(filename)+".*.tmp")
+	if err != nil {
+		return err
+	}
+	tempPath := temp.Name()
+	defer os.Remove(tempPath) // rename 성공 시에는 대상이 없으므로 무해하다
+	if _, err := temp.Write(data); err != nil {
+		temp.Close()
+		return err
+	}
+	if err := temp.Close(); err != nil {
+		return err
+	}
+	// CreateTemp은 0600으로 만들므로 기존 저장 권한(0644)에 맞춘다.
+	if err := os.Chmod(tempPath, 0644); err != nil {
+		return err
+	}
+	return os.Rename(tempPath, filename)
+}
+
 // NewUserDataManager creates a new user data manager.
 func NewUserDataManager() (*UserDataManager, error) {
 	homeDir, err := os.UserHomeDir()
@@ -111,13 +137,8 @@ func (m *UserDataManager) SaveSettings(settings *types.UserSettings) error {
 	}
 
 	// Atomic write: write to temp file then rename
-	tmpFile := filename + ".tmp"
-	if err := os.WriteFile(tmpFile, data, 0644); err != nil {
+	if err := writeFileAtomic(filename, data); err != nil {
 		return fmt.Errorf("failed to write settings file: %w", err)
-	}
-	if err := os.Rename(tmpFile, filename); err != nil {
-		os.Remove(tmpFile)
-		return fmt.Errorf("failed to rename settings file: %w", err)
 	}
 
 	return nil
@@ -187,13 +208,8 @@ func (m *UserDataManager) SaveBookmarks(bookmarks *types.Bookmarks) error {
 	}
 
 	// Atomic write
-	tmpFile := filename + ".tmp"
-	if err := os.WriteFile(tmpFile, data, 0644); err != nil {
+	if err := writeFileAtomic(filename, data); err != nil {
 		return fmt.Errorf("failed to write bookmarks file: %w", err)
-	}
-	if err := os.Rename(tmpFile, filename); err != nil {
-		os.Remove(tmpFile)
-		return fmt.Errorf("failed to rename bookmarks file: %w", err)
 	}
 
 	return nil
@@ -253,13 +269,8 @@ func (m *UserDataManager) SavePathHistory(history *types.PathHistory) error {
 	}
 
 	// Atomic write
-	tmpFile := filename + ".tmp"
-	if err := os.WriteFile(tmpFile, data, 0644); err != nil {
+	if err := writeFileAtomic(filename, data); err != nil {
 		return fmt.Errorf("failed to write path history file: %w", err)
-	}
-	if err := os.Rename(tmpFile, filename); err != nil {
-		os.Remove(tmpFile)
-		return fmt.Errorf("failed to rename path history file: %w", err)
 	}
 
 	return nil
@@ -301,13 +312,8 @@ func (m *UserDataManager) SaveBackupHistory(history *types.BackupHistory) error 
 	}
 
 	// Atomic write
-	tmpFile := filename + ".tmp"
-	if err := os.WriteFile(tmpFile, data, 0644); err != nil {
+	if err := writeFileAtomic(filename, data); err != nil {
 		return fmt.Errorf("failed to write backup history file: %w", err)
-	}
-	if err := os.Rename(tmpFile, filename); err != nil {
-		os.Remove(tmpFile)
-		return fmt.Errorf("failed to rename backup history file: %w", err)
 	}
 
 	return nil

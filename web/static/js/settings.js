@@ -154,7 +154,33 @@ async function loadSettings() {
 }
 
 // 설정 저장
+// 저장 요청은 한 번에 하나만 보낸다. 병렬로 보내면 먼저 출발한 느린 요청이 나중에
+// 서버 파일을 교체해 최신 설정을 덮는다. 저장 중 들어온 요청은 한 번으로 합치고,
+// 전송 시점의 폼 상태를 다시 읽으므로 마지막 전송이 항상 최신 값을 담는다.
+let settingsSaveInFlight = null;
+let settingsSaveQueued = false;
+
 async function saveSettings() {
+    if (settingsSaveInFlight) {
+        settingsSaveQueued = true;
+        return settingsSaveInFlight;
+    }
+
+    settingsSaveInFlight = (async () => {
+        try {
+            do {
+                settingsSaveQueued = false;
+                await sendCurrentSettings();
+            } while (settingsSaveQueued);
+        } finally {
+            settingsSaveInFlight = null;
+        }
+    })();
+
+    return settingsSaveInFlight;
+}
+
+async function sendCurrentSettings() {
     // Clear previous errors
     clearPathErrors();
 
