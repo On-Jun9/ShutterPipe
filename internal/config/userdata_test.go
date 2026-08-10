@@ -1,10 +1,13 @@
 package config
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/On-Jun9/ShutterPipe/pkg/types"
@@ -263,6 +266,53 @@ func TestUserDataManager_SaveSettings_ReturnsRenameError(t *testing.T) {
 	err := m.SaveSettings(&types.UserSettings{Source: "/src", Dest: "/dest"})
 	if err == nil {
 		t.Fatal("expected settings rename error")
+	}
+}
+
+// TestUserDataManager_SaveSettings_SurvivesConcurrentWrites는 테스트 코드 동작을 검증하거나 보조합니다.
+func TestUserDataManager_SaveSettings_SurvivesConcurrentWrites(t *testing.T) {
+	// 웹 UI는 필드를 연속 변경하면 저장 요청을 겹쳐 보낸다. 동시 저장이 서로의
+	// 임시 파일을 덮어써 rename 실패나 JSON 손상을 만들지 않아야 한다.
+	dataDir := t.TempDir()
+	m := &UserDataManager{dataDir: dataDir}
+
+	const writers = 8
+	var wg sync.WaitGroup
+	errs := make([]error, writers)
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			errs[i] = m.SaveSettings(&types.UserSettings{
+				Source:            strings.Repeat("s", 1+i*200),
+				Dest:              "/dest",
+				IncludeExtensions: []string{"jpg", "mov"},
+			})
+		}(i)
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("동시 저장 %d번이 실패했다: %v", i, err)
+		}
+	}
+
+	data, err := os.ReadFile(filepath.Join(dataDir, "settings.json"))
+	if err != nil {
+		t.Fatalf("failed to read settings after concurrent writes: %v", err)
+	}
+	var settings types.UserSettings
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatalf("동시 저장 후 settings.json이 손상됐다: %v", err)
+	}
+
+	leftovers, err := filepath.Glob(filepath.Join(dataDir, "*.tmp"))
+	if err != nil {
+		t.Fatalf("failed to glob temp files: %v", err)
+	}
+	if len(leftovers) > 0 {
+		t.Errorf("임시 파일이 남았다: %v", leftovers)
 	}
 }
 

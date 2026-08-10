@@ -128,6 +128,15 @@ function updateProgressReadout(update = {}) {
     }
 }
 
+// 진행 영역 머리말은 실행 상태를 따라간다. 정적 문자열로 두면 종료 후에도 RUNNING이 남는다.
+const RUN_STATE_KICKERS = {
+    idle: 'READY',
+    running: 'RUNNING',
+    cancelling: 'CANCELLING',
+    complete: 'DONE',
+    error: 'ERROR'
+};
+
 function setRunVisualState(state) {
     const form = firstExistingElement(['backupForm', 'runForm', 'backupWorkflow', 'runWorkflow']);
     const isActive = state === 'running' || state === 'cancelling';
@@ -155,6 +164,8 @@ function setRunVisualState(state) {
     setElementHidden(verifyBtn, isActive);
     setElementHidden(cancelBtn, !isActive);
     if (lamp?.setAttribute) lamp.setAttribute('aria-label', `실행 상태: ${state}`);
+    const kicker = document.getElementById('progressKicker');
+    if (kicker) kicker.textContent = RUN_STATE_KICKERS[state] || RUN_STATE_KICKERS.running;
     updateRunActionLabels();
 }
 

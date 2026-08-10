@@ -117,6 +117,9 @@
   .log-copy { flex: none; }
   .run-next-actions, .summary-actions { margin-block-start: var(--space-4); }
 
+  /* 완료 요약 본문은 섹션을 세로로 쌓는다. 이 컨테이너를 summary-grid로 두면
+     섹션과 재복사 버튼이 열로 쪼개지고 행 높이만큼 늘어난다. */
+  .summary-body { display: block; }
   .summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 148px), 1fr)); gap: var(--space-2); }
   .summary-section { padding-block: var(--space-4); border-top: 1px solid var(--border); }
   .summary-section:first-child { border-top: 0; padding-top: 0; }

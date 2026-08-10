@@ -489,6 +489,19 @@ function handleWebSocketClose(event, backupMayStillBeRunning, cancelInProgress) 
     }
 }
 
+// 진행 카운터 정규화: 값이 없거나 숫자가 아닌 이벤트에서도 NaN%가 화면에 남지 않게 한다.
+function progressCounters(update) {
+    const total = Number(update.total);
+    const current = Number(update.current);
+    const safeTotal = Number.isFinite(total) && total > 0 ? total : 0;
+    const safeCurrent = Number.isFinite(current) && current > 0 ? current : 0;
+    return {
+        current: safeCurrent,
+        total: safeTotal,
+        percent: safeTotal > 0 ? Math.min(100, Math.round((safeCurrent / safeTotal) * 100)) : 0
+    };
+}
+
 // 진행 상황 업데이트 처리
 function handleProgressUpdate(update) {
     if (!acceptProgressUpdate(update)) {
@@ -533,21 +546,21 @@ function handleProgressUpdate(update) {
         addLogEntry(update.message, 'info');
 
     } else if (update.type === 'analysis_progress') {
-        const percent = update.total > 0 ? Math.round((update.current / update.total) * 100) : 0;
+        const { current, total, percent } = progressCounters(update);
         if (progressBar) {
             progressBar.classList.remove('pulse');
             progressBar.style.width = percent + '%';
         }
         if (progressPercent) progressPercent.textContent = percent + '%';
-        if (progressText) progressText.textContent = `${update.message} (${update.current}/${update.total})`;
+        if (progressText) progressText.textContent = `${update.message} (${current}/${total})`;
         updateProgressReadout(update);
         // 500개마다 로그 출력
-        if (update.current % 500 === 0) {
-             addLogEntry(`${update.message} (${update.current}/${update.total})`, 'info');
+        if (current % 500 === 0) {
+             addLogEntry(`${update.message} (${current}/${total})`, 'info');
         }
 
     } else if (update.type === 'progress') {
-        const percent = update.total > 0 ? Math.round((update.current / update.total) * 100) : 0;
+        const { current, total, percent } = progressCounters(update);
         if (progressBar) {
             progressBar.classList.remove('pulse');
             progressBar.style.width = percent + '%';
@@ -555,12 +568,12 @@ function handleProgressUpdate(update) {
         if (progressPercent) progressPercent.textContent = percent + '%';
         updateProgressReadout(update);
         if (operationKind === 'verify') {
-            if (progressText) progressText.textContent = `검증 중: ${update.filename} (${update.current}/${update.total})`;
+            if (progressText) progressText.textContent = `검증 중: ${update.filename} (${current}/${total})`;
             if (update.verify_verdict && update.verify_verdict !== 'ok') {
                 addFileToList(update.filename, update.verify_verdict);
             }
         } else {
-            if (progressText) progressText.textContent = `복사 중: ${update.filename} (${update.current}/${update.total})`;
+            if (progressText) progressText.textContent = `복사 중: ${update.filename} (${current}/${total})`;
             addFileToList(update.filename, update.action);
 
             // 에러나 특수 동작 로그
