@@ -85,6 +85,7 @@ async function startBackup(kind = 'backup') {
             // 고급 설정
             include_extensions: includeExtensions,
             jobs: parseInt(document.getElementById('jobs').value) || 0,
+            metadata_jobs: parseInt(document.getElementById('metadataJobs').value) || 2,
             unclassified_dir: document.getElementById('unclassifiedDir').value || 'unclassified',
             quarantine_dir: document.getElementById('quarantineDir').value || 'quarantine',
             state_file: document.getElementById('stateFile').value,
@@ -721,4 +722,3 @@ function initializeRunUI() {
 }
 
 window.addEventListener('DOMContentLoaded', initializeRunUI);
-

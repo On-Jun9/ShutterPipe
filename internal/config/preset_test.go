@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -16,6 +17,7 @@ func TestConfigToPresetAndBack(t *testing.T) {
 		Dest:              "/dest",
 		IncludeExtensions: []string{"jpg", "mp4"},
 		Jobs:              3,
+		MetadataJobs:      2,
 		DedupMethod:       types.DedupMethodHash,
 		ConflictPolicy:    types.ConflictPolicyRename,
 		OrganizeStrategy:  types.OrganizeByEvent,
@@ -35,11 +37,27 @@ func TestConfigToPresetAndBack(t *testing.T) {
 	if roundTrip.Source != cfg.Source || roundTrip.Dest != cfg.Dest {
 		t.Fatalf("source/dest mismatch after round trip: %+v", roundTrip)
 	}
-	if roundTrip.EventName != cfg.EventName || roundTrip.Jobs != cfg.Jobs {
+	if roundTrip.EventName != cfg.EventName || roundTrip.Jobs != cfg.Jobs || roundTrip.MetadataJobs != cfg.MetadataJobs {
 		t.Fatalf("event/jobs mismatch after round trip: %+v", roundTrip)
 	}
 	if roundTrip.DedupMethod != cfg.DedupMethod || roundTrip.ConflictPolicy != cfg.ConflictPolicy {
 		t.Fatalf("policy mismatch after round trip: %+v", roundTrip)
+	}
+}
+
+func TestPresetToConfig_LegacyPresetUsesDefaultMetadataJobs(t *testing.T) {
+	cfg := PresetToConfig(&types.ConfigPreset{})
+	if cfg.MetadataJobs != 2 {
+		t.Fatalf("legacy preset metadata_jobs = %d, want 2", cfg.MetadataJobs)
+	}
+}
+
+func TestPresetManager_SavePreset_RejectsInvalidMetadataJobs(t *testing.T) {
+	pm := &PresetManager{presetsDir: t.TempDir()}
+	err := pm.SavePreset(&types.ConfigPreset{Name: "invalid", MetadataJobs: 99})
+	var validationErr *ValidationError
+	if !errors.As(err, &validationErr) || validationErr.Field != "metadata_jobs" {
+		t.Fatalf("expected metadata_jobs ValidationError, got %T %v", err, err)
 	}
 }
 

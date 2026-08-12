@@ -307,14 +307,18 @@
     <dialog id="advancedSettingsDialog" class="advanced-dialog" aria-labelledby="advanced-dialog-title">
         <div class="advanced-dialog-header">
             <h3 id="advanced-dialog-title">고급 설정</h3>
-            <p class="advanced-dialog-hint">워커 수 · 폴더명 · 상태/로그 파일</p>
+            <p class="advanced-dialog-hint">복사/메타데이터 워커 수 · 폴더명 · 상태/로그 파일</p>
         </div>
         <div id="advancedDialogSlot" class="advanced-dialog-body">
             <div id="advancedSettingsContent" class="advanced-settings-content">
                                 <div class="setting-rows">
                                     <div class="setting-row">
-                                        <label class="setting-key" for="jobs">병렬 워커 수<small>0=자동, 1-32=수동 지정</small></label>
+                                        <label class="setting-key" for="jobs">복사 워커 수<small>0=자동, 1-32=수동 지정</small></label>
                                         <input type="number" id="jobs" class="input-modern input-compact" min="0" max="32" value="0" placeholder="0 (자동)" onchange="saveSettings()">
+                                    </div>
+                                    <div class="setting-row">
+                                        <label class="setting-key" for="metadataJobs">메타데이터 워커 수<small>기본 2, 1-32=수동 지정</small></label>
+                                        <input type="number" id="metadataJobs" class="input-modern input-compact" min="1" max="32" value="2" placeholder="2" onchange="saveSettings()">
                                     </div>
                                     <div class="setting-row">
                                         <label class="setting-key" for="unclassifiedDir">분류 불가 폴더명<small>메타데이터가 없는 파일이 저장되는 폴더</small></label>
@@ -347,18 +351,18 @@
     <div id="source-bookmarks" class="bookmark-dropdown" hidden></div>
     <div id="dest-bookmarks" class="bookmark-dropdown" hidden></div>
 
-    <script src="js/core.js?v=20260724"></script>
-    <script src="js/log.js?v=20260724"></script>
-    <script src="js/extensions.js?v=20260724"></script>
-    <script src="js/userdata-api.js?v=20260724"></script>
-    <script src="js/settings.js?v=20260724"></script>
-    <script src="js/path-autocomplete.js?v=20260724"></script>
-    <script src="js/run-ui.js?v=20260724"></script>
-    <script src="js/run-tracking.js?v=20260724"></script>
-    <script src="js/run-results.js?v=20260724"></script>
-    <script src="js/verify.js?v=20260724"></script>
-    <script src="js/backup.js?v=20260724"></script>
-    <script src="js/preset.js?v=20260724"></script>
-    <script src="js/history.js?v=20260724"></script>
+    <script src="js/core.js?v=20260812"></script>
+    <script src="js/log.js?v=20260812"></script>
+    <script src="js/extensions.js?v=20260812"></script>
+    <script src="js/userdata-api.js?v=20260812"></script>
+    <script src="js/settings.js?v=20260812"></script>
+    <script src="js/path-autocomplete.js?v=20260812"></script>
+    <script src="js/run-ui.js?v=20260812"></script>
+    <script src="js/run-tracking.js?v=20260812"></script>
+    <script src="js/run-results.js?v=20260812"></script>
+    <script src="js/verify.js?v=20260812"></script>
+    <script src="js/backup.js?v=20260812"></script>
+    <script src="js/preset.js?v=20260812"></script>
+    <script src="js/history.js?v=20260812"></script>
 </body>
 </html>

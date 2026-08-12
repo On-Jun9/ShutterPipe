@@ -25,6 +25,7 @@ func newTestConfig(baseDir, sourceDir, destDir string) *config.Config {
 		Dest:              destDir,
 		IncludeExtensions: []string{"jpg"},
 		Jobs:              1,
+		MetadataJobs:      1,
 		DedupMethod:       types.DedupMethodNameSize,
 		ConflictPolicy:    types.ConflictPolicySkip,
 		OrganizeStrategy:  types.OrganizeByDate,

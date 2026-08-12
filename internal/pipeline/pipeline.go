@@ -22,6 +22,12 @@ import (
 	"github.com/On-Jun9/ShutterPipe/pkg/types"
 )
 
+// metadataClassificationSchemaVersion invalidates processed-file state when
+// metadata extraction or classification semantics change. Increment this value
+// whenever the same source file could resolve to a different capture date or
+// destination under otherwise identical configuration.
+const metadataClassificationSchemaVersion = "metadata-classification-v2"
+
 var (
 	ErrRunCanceled      = errors.New("backup run canceled")
 	ErrRunFailed        = errors.New("backup run completed with file failures")
@@ -254,31 +260,33 @@ func (p *Pipeline) RunWithContext(ctx context.Context) (*types.RunSummary, error
 	// silently frozen into a stale destination on the next run.
 	contextBySource := make(map[string]state.SourceContext)
 
-	for i, entry := range entries {
-		if ctx.Err() != nil {
-			summary.TotalFiles = filteredCount
-			summary.Unclassified = unclassifiedCount
-			return p.finishCanceledRun(summary, 0, ctx.Err())
+	metadataAnalysisStream := p.startMetadataAnalysis(ctx, fingerprint, entries)
+	defer metadataAnalysisStream.Close()
+	for i := 0; ; i++ {
+		analysis, ok := metadataAnalysisStream.Next()
+		if !ok {
+			break
+		}
+		entry := analysis.entry
+		if (i+1)%100 == 0 && p.progressCallback != nil {
+			p.progressCallback(ProgressUpdate{
+				Type:    "analysis_progress",
+				Message: "메타데이터 분석 중...",
+				Current: i + 1,
+				Total:   len(entries),
+			})
 		}
 
-		if i%100 == 0 {
-			if p.progressCallback != nil {
-				p.progressCallback(ProgressUpdate{
-					Type:    "analysis_progress",
-					Message: "메타데이터 분석 중...",
-					Current: i,
-					Total:   len(entries),
-				})
-			}
-		}
-
-		sctx, sidecar, hasSidecar, err := p.sourceContext(ctx, fingerprint, entry)
-		if cause := contextTermination(ctx, err); cause != nil {
+		sctx := analysis.sourceContext
+		err := analysis.sourceErr
+		if cause := contextTermination(nil, err); cause != nil {
+			metadataAnalysisStream.Close()
 			summary.TotalFiles = filteredCount
 			summary.Unclassified = unclassifiedCount
 			return p.finishCanceledRun(summary, 0, cause)
 		}
 		if err != nil {
+			metadataAnalysisStream.Close()
 			summary.TotalFiles = filteredCount + 1
 			summary.Unclassified = unclassifiedCount
 			summary.Failed++
@@ -288,8 +296,11 @@ func (p *Pipeline) RunWithContext(ctx context.Context) (*types.RunSummary, error
 				fmt.Errorf("failed to identify metadata sidecar for %s: %w", entry.Path, err),
 			)
 		}
-		rebackupMarker, forceRebackup, markerErr := p.applicableRebackupMarker(ctx, entry, sctx)
-		if cause := contextTermination(ctx, markerErr); cause != nil {
+		rebackupMarker := analysis.rebackupMarker
+		forceRebackup := analysis.forceRebackup
+		markerErr := analysis.markerErr
+		if cause := contextTermination(nil, markerErr); cause != nil {
+			metadataAnalysisStream.Close()
 			summary.TotalFiles = filteredCount
 			summary.Unclassified = unclassifiedCount
 			return p.finishCanceledRun(summary, 0, cause)
@@ -304,14 +315,16 @@ func (p *Pipeline) RunWithContext(ctx context.Context) (*types.RunSummary, error
 			p.logger.LogTask(failedTask, 0)
 			continue
 		}
-		stateProcessed := !forceRebackup && !p.cfg.IgnoreState && p.state.IsEntryProcessed(ctx, entry, p.cfg.HashVerify, sctx)
-		if stateProcessed && p.cfg.ConflictPolicy != types.ConflictPolicyOverwrite {
+		stateProcessed := analysis.stateProcessed
+		if analysis.skipProcessed {
 			continue
 		}
 		contextBySource[entry.Path] = sctx
 
-		meta, err := p.extractMetadata(ctx, entry, sidecar, hasSidecar)
-		if cause := contextTermination(ctx, err); cause != nil {
+		meta := analysis.metadata
+		err = analysis.metadataErr
+		if cause := contextTermination(nil, err); cause != nil {
+			metadataAnalysisStream.Close()
 			summary.TotalFiles = filteredCount
 			summary.Unclassified = unclassifiedCount
 			return p.finishCanceledRun(summary, 0, cause)
@@ -753,6 +766,7 @@ func (p *Pipeline) markProcessed(ctx context.Context, source types.FileEntry, de
 // not shortcut the run, or a re-pointed destination would be silently skipped.
 func stateFingerprint(cfg *config.Config) string {
 	return strings.Join([]string{
+		metadataClassificationSchemaVersion,
 		cfg.Dest,
 		string(cfg.OrganizeStrategy),
 		cfg.EventName,
@@ -813,7 +827,11 @@ func extractMetadataWithExtractor(ctx context.Context, entry types.FileEntry, si
 	if !hasSidecar {
 		return types.MediaMetadata{Error: "XML metadata file not found"}, nil
 	}
-	return metadata.ExtractFromSidecar(sidecar), nil
+	meta := metadata.ExtractFromSidecarWithContext(ctx, sidecar)
+	if err := ctx.Err(); err != nil {
+		return types.MediaMetadata{}, err
+	}
+	return meta, nil
 }
 
 func overwriteDispositionCount(policy types.ConflictPolicy, dirtyCountByDest map[string]int, destPath string) int {
@@ -1105,6 +1123,7 @@ func backupConfigFromConfig(cfg *config.Config) types.BackupConfig {
 		DateFilterStart:   cfg.DateFilterStart,
 		DateFilterEnd:     cfg.DateFilterEnd,
 		Jobs:              cfg.Jobs,
+		MetadataJobs:      cfg.MetadataJobs,
 		IncludeExtensions: cfg.IncludeExtensions,
 		UnclassifiedDir:   cfg.UnclassifiedDir,
 		QuarantineDir:     cfg.QuarantineDir,

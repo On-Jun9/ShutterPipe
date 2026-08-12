@@ -3,12 +3,42 @@ package pipeline
 import (
 	"reflect"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/On-Jun9/ShutterPipe/internal/config"
 	"github.com/On-Jun9/ShutterPipe/pkg/types"
 )
+
+func TestStateFingerprintVersionsMetadataClassification(t *testing.T) {
+	cfg := &config.Config{
+		Dest:             "/dest",
+		OrganizeStrategy: types.OrganizeByEvent,
+		EventName:        "trip",
+		UnclassifiedDir:  "unclassified",
+		QuarantineDir:    "quarantine",
+		ConflictPolicy:   types.ConflictPolicyRename,
+		DedupMethod:      types.DedupMethodHash,
+	}
+	legacyFingerprint := strings.Join([]string{
+		cfg.Dest,
+		string(cfg.OrganizeStrategy),
+		cfg.EventName,
+		cfg.UnclassifiedDir,
+		cfg.QuarantineDir,
+		string(cfg.ConflictPolicy),
+		string(cfg.DedupMethod),
+	}, "\x00")
+
+	currentFingerprint := stateFingerprint(cfg)
+	if currentFingerprint == legacyFingerprint {
+		t.Fatal("metadata classification schema change did not invalidate legacy state")
+	}
+	if !strings.Contains(currentFingerprint, metadataClassificationSchemaVersion) {
+		t.Fatalf("fingerprint does not contain metadata schema version: %q", currentFingerprint)
+	}
+}
 
 // TestPipelineShouldIncludeByDate_NoFilter는 테스트 코드 동작을 검증하거나 보조합니다.
 func TestPipelineShouldIncludeByDate_NoFilter(t *testing.T) {
@@ -132,6 +162,7 @@ func TestPipelineConfigToBackupConfig_MapsFields(t *testing.T) {
 		DateFilterStart:   "2025-01-01",
 		DateFilterEnd:     "2025-01-31",
 		Jobs:              7,
+		MetadataJobs:      3,
 		IncludeExtensions: []string{"jpg", "mp4"},
 		UnclassifiedDir:   "unc",
 		QuarantineDir:     "quar",
@@ -152,6 +183,7 @@ func TestPipelineConfigToBackupConfig_MapsFields(t *testing.T) {
 		DateFilterStart:   "2025-01-01",
 		DateFilterEnd:     "2025-01-31",
 		Jobs:              7,
+		MetadataJobs:      3,
 		IncludeExtensions: []string{"jpg", "mp4"},
 		UnclassifiedDir:   "unc",
 		QuarantineDir:     "quar",

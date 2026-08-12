@@ -17,6 +17,7 @@ var (
 	dest           string
 	includeExt     []string
 	jobs           int
+	metadataJobs   int
 	dedupMethod    string
 	conflictPolicy string
 	unclassified   string
@@ -65,6 +66,7 @@ func init() {
 	runCmd.Flags().StringVarP(&dest, "dest", "d", "", "destination directory (NAS)")
 	runCmd.Flags().StringSliceVarP(&includeExt, "include-ext", "e", nil, "file extensions to include")
 	runCmd.Flags().IntVarP(&jobs, "jobs", "j", 0, "number of concurrent workers (0=auto)")
+	runCmd.Flags().IntVar(&metadataJobs, "metadata-jobs", 0, "number of metadata workers (0=default 2)")
 	runCmd.Flags().StringVar(&dedupMethod, "dedup", "", "dedup method: name-size, hash")
 	runCmd.Flags().StringVar(&conflictPolicy, "conflict", "", "conflict policy: skip, rename, overwrite, quarantine")
 	runCmd.Flags().StringVar(&unclassified, "unclassified-dir", "", "directory for files without capture date")
@@ -100,6 +102,9 @@ func runPipeline(cmd *cobra.Command, args []string) error {
 	}
 	if cmd.Flags().Changed("jobs") {
 		cfg.Jobs = jobs
+	}
+	if cmd.Flags().Changed("metadata-jobs") {
+		cfg.MetadataJobs = metadataJobs
 	}
 	if dedupMethod != "" {
 		cfg.DedupMethod = types.DedupMethod(dedupMethod)

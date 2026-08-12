@@ -76,6 +76,15 @@ func TestUserDataManager_SaveSettings_ReturnsValidationError(t *testing.T) {
 	}
 }
 
+func TestUserDataManager_SaveSettings_RejectsInvalidMetadataJobs(t *testing.T) {
+	m := &UserDataManager{dataDir: t.TempDir()}
+	err := m.SaveSettings(&types.UserSettings{Source: "/src", Dest: "/dest", MetadataJobs: 99})
+	var validationErr *ValidationError
+	if !errors.As(err, &validationErr) || validationErr.Field != "metadata_jobs" {
+		t.Fatalf("expected metadata_jobs ValidationError, got %T %v", err, err)
+	}
+}
+
 // TestUserDataManager_SaveBookmarks_ReturnsValidationError는 테스트 코드 동작을 검증하거나 보조합니다.
 func TestUserDataManager_SaveBookmarks_ReturnsValidationError(t *testing.T) {
 	// 북마크 저장도 동일한 타입 기반 ValidationError를 반환해야 한다.
@@ -215,6 +224,7 @@ func TestUserDataManager_SaveAndLoadSettings_RoundTrip(t *testing.T) {
 		ConflictPolicy:    types.ConflictPolicyRename,
 		DedupMethod:       types.DedupMethodHash,
 		Jobs:              4,
+		MetadataJobs:      3,
 		IncludeExtensions: []string{"jpg", "mp4"},
 		UnclassifiedDir:   "unc",
 		QuarantineDir:     "quar",
@@ -233,6 +243,9 @@ func TestUserDataManager_SaveAndLoadSettings_RoundTrip(t *testing.T) {
 	}
 	if loaded.EventName != "trip" || loaded.ConflictPolicy != types.ConflictPolicyRename {
 		t.Fatalf("unexpected loaded settings fields: %+v", loaded)
+	}
+	if loaded.MetadataJobs != settings.MetadataJobs {
+		t.Fatalf("metadata_jobs mismatch: want=%d got=%d", settings.MetadataJobs, loaded.MetadataJobs)
 	}
 	if loaded.UpdatedAt.IsZero() {
 		t.Fatal("expected updated_at to be set")

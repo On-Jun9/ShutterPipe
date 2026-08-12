@@ -411,6 +411,24 @@ func (s *Server) handleSavePreset(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusBadRequest, "preset name is required")
 		return
 	}
+	if err := config.ValidateJobs(req.Config.Jobs); err != nil {
+		var validationErr *config.ValidationError
+		if errors.As(err, &validationErr) {
+			writeValidationError(w, validationErr.Field, validationErr.Message)
+			return
+		}
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := config.ValidateMetadataJobs(req.Config.MetadataJobs); err != nil {
+		var validationErr *config.ValidationError
+		if errors.As(err, &validationErr) {
+			writeValidationError(w, validationErr.Field, validationErr.Message)
+			return
+		}
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 
 	pm, err := config.NewPresetManager()
 	if err != nil {

@@ -127,6 +127,12 @@ func (m *UserDataManager) SaveSettings(settings *types.UserSettings) error {
 			Message: fmt.Sprintf("invalid destination path: %v", err),
 		}
 	}
+	if err := ValidateJobs(settings.Jobs); err != nil {
+		return err
+	}
+	if err := ValidateMetadataJobs(settings.MetadataJobs); err != nil {
+		return err
+	}
 
 	settings.UpdatedAt = time.Now()
 
@@ -157,6 +163,7 @@ func (m *UserDataManager) LoadSettings() (*types.UserSettings, error) {
 				ConflictPolicy:   types.ConflictPolicySkip,
 				DedupMethod:      types.DedupMethodNameSize,
 				Jobs:             0,
+				MetadataJobs:     2,
 				IncludeExtensions: []string{
 					"jpg", "jpeg", "heic", "heif", "png", "raw", "arw", "cr2", "nef", "dng",
 					"mp4", "mov", "avi", "mkv", "mxf", "xml",

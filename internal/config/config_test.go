@@ -71,6 +71,9 @@ func TestConfigValidate_FillsDefaults(t *testing.T) {
 	if cfg.Jobs != expectedJobs {
 		t.Fatalf("expected jobs=%d, got %d", expectedJobs, cfg.Jobs)
 	}
+	if cfg.MetadataJobs != 2 {
+		t.Fatalf("expected metadata_jobs=2, got %d", cfg.MetadataJobs)
+	}
 
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
@@ -89,6 +92,22 @@ func TestConfigValidate_FillsDefaults(t *testing.T) {
 	}
 	if cfg.QuarantineDir != "quarantine" {
 		t.Fatalf("unexpected quarantine dir: %s", cfg.QuarantineDir)
+	}
+}
+
+func TestConfigValidate_RejectsMetadataJobsOutsideSupportedRange(t *testing.T) {
+	for _, jobs := range []int{-1, 33, 1 << 20} {
+		cfg := &Config{
+			Source:       "/tmp/source",
+			Dest:         "/tmp/dest",
+			MetadataJobs: jobs,
+		}
+
+		err := cfg.Validate()
+		var validationErr *ValidationError
+		if !errors.As(err, &validationErr) || validationErr.Field != "metadata_jobs" {
+			t.Fatalf("expected metadata_jobs ValidationError for %d, got %T %v", jobs, err, err)
+		}
 	}
 }
 
