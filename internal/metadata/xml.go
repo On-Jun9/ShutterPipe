@@ -1,6 +1,7 @@
 package metadata
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/xml"
@@ -16,6 +17,8 @@ import (
 )
 
 type XMLExtractor struct{}
+
+const maxXMLMetadataSize int64 = 1 << 20
 
 func NewXMLExtractor() *XMLExtractor {
 	return &XMLExtractor{}
@@ -62,7 +65,7 @@ func extractXMLFileWithContext(ctx context.Context, path, source string) types.M
 	}
 	defer f.Close()
 
-	data, err := io.ReadAll(contextReader{ctx: ctx, r: f})
+	data, err := readXMLMetadata(ctx, f)
 	if err != nil {
 		return types.MediaMetadata{Error: "failed to read XML: " + err.Error()}
 	}
@@ -70,9 +73,25 @@ func extractXMLFileWithContext(ctx context.Context, path, source string) types.M
 	return extractXMLBytes(data, source)
 }
 
+func readXMLMetadata(ctx context.Context, reader io.Reader) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(contextReader{ctx: normalizeContext(ctx), r: reader}, maxXMLMetadataSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxXMLMetadataSize {
+		return nil, fmt.Errorf("XML metadata exceeds %d bytes", maxXMLMetadataSize)
+	}
+	return data, nil
+}
+
 func extractXMLBytes(data []byte, source string) types.MediaMetadata {
+	return extractXMLBytesWithContext(context.Background(), data, source)
+}
+
+func extractXMLBytesWithContext(ctx context.Context, data []byte, source string) types.MediaMetadata {
 	var meta nonRealTimeMeta
-	if err := xml.Unmarshal(data, &meta); err != nil {
+	decoder := xml.NewDecoder(contextReader{ctx: normalizeContext(ctx), r: bytes.NewReader(data)})
+	if err := decoder.Decode(&meta); err != nil {
 		return types.MediaMetadata{Error: "failed to parse XML: " + err.Error()}
 	}
 
@@ -124,7 +143,10 @@ func SidecarIdentity(ctx context.Context, entry types.FileEntry) (SidecarIdentit
 	if err != nil {
 		return SidecarIdentityInfo{}, false, err
 	}
-	data, err := io.ReadAll(contextReader{ctx: ctx, r: f})
+	if before.Size() > maxXMLMetadataSize {
+		return SidecarIdentityInfo{}, false, fmt.Errorf("XML sidecar exceeds %d bytes: %s", maxXMLMetadataSize, xmlPath)
+	}
+	data, err := readXMLMetadata(ctx, f)
 	if err != nil {
 		return SidecarIdentityInfo{}, false, err
 	}
@@ -153,7 +175,11 @@ func SidecarIdentity(ctx context.Context, entry types.FileEntry) (SidecarIdentit
 // by SidecarIdentity, so classification can never see different sidecar content
 // than the identity recorded in state.
 func ExtractFromSidecar(identity SidecarIdentityInfo) types.MediaMetadata {
-	return extractXMLBytes(identity.Content, "XML:CreationDate")
+	return ExtractFromSidecarWithContext(context.Background(), identity)
+}
+
+func ExtractFromSidecarWithContext(ctx context.Context, identity SidecarIdentityInfo) types.MediaMetadata {
+	return extractXMLBytesWithContext(ctx, identity.Content, "XML:CreationDate")
 }
 
 func actualDirectoryEntryPath(path string, requestedInfo os.FileInfo) string {

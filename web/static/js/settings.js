@@ -97,6 +97,7 @@ async function loadSettings() {
 
         // 고급 설정
         document.getElementById('jobs').value = config.jobs || 0;
+        document.getElementById('metadataJobs').value = config.metadata_jobs || 2;
         document.getElementById('unclassifiedDir').value = config.unclassified_dir || 'unclassified';
         document.getElementById('quarantineDir').value = config.quarantine_dir || 'quarantine';
         document.getElementById('stateFile').value = config.state_file || '';
@@ -191,6 +192,12 @@ async function sendCurrentSettings() {
     if (jobsValue > 32) jobsValue = 32;
     jobsInput.value = jobsValue;
 
+    const metadataJobsInput = document.getElementById('metadataJobs');
+    let metadataJobsValue = parseInt(metadataJobsInput.value) || 2;
+    if (metadataJobsValue < 1) metadataJobsValue = 1;
+    if (metadataJobsValue > 32) metadataJobsValue = 32;
+    metadataJobsInput.value = metadataJobsValue;
+
     const config = {
         // 기본 설정
         source: document.getElementById('source').value,
@@ -209,6 +216,7 @@ async function sendCurrentSettings() {
 
         // 고급 설정
         jobs: jobsValue,
+        metadata_jobs: metadataJobsValue,
         include_extensions: includeExtensions,
         unclassified_dir: document.getElementById('unclassifiedDir').value || 'unclassified',
         quarantine_dir: document.getElementById('quarantineDir').value || 'quarantine',

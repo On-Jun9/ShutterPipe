@@ -207,6 +207,7 @@ async function loadPresetByName(presetName) {
         setPresetFieldValue('dateFilterStart', config.date_filter_start);
         setPresetFieldValue('dateFilterEnd', config.date_filter_end);
         setPresetFieldValue('jobs', config.jobs ?? 0);
+        setPresetFieldValue('metadataJobs', config.metadata_jobs ?? 2);
         setPresetFieldValue('unclassifiedDir', config.unclassified_dir, 'unclassified');
         setPresetFieldValue('quarantineDir', config.quarantine_dir, 'quarantine');
         setPresetFieldValue('stateFile', config.state_file);
@@ -268,11 +269,13 @@ function hideSavePresetDialog() {
 
 function buildPresetConfig() {
     const jobsValue = Number.parseInt(getPresetInputValue('jobs', '0'), 10);
+    const metadataJobsValue = Number.parseInt(getPresetInputValue('metadataJobs', '2'), 10);
     return {
         source: getPresetInputValue('source'),
         dest: getPresetInputValue('dest'),
         include_extensions: typeof includeExtensions !== 'undefined' ? includeExtensions : [],
         jobs: Number.isNaN(jobsValue) ? 0 : jobsValue,
+        metadata_jobs: Number.isNaN(metadataJobsValue) ? 2 : metadataJobsValue,
         dedup_method: getPresetInputValue('dedupMethod', 'name-size'),
         conflict_policy: getPresetInputValue('conflictPolicy', 'skip'),
         organize_strategy: getPresetInputValue('organizeStrategy', 'date'),

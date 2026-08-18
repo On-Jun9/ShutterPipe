@@ -110,6 +110,28 @@ func TestHandlePresetHandlers_CRUDFlow(t *testing.T) {
 	}
 }
 
+func TestHandleSavePreset_RejectsInvalidMetadataJobs(t *testing.T) {
+	s := &Server{}
+	t.Setenv("HOME", t.TempDir())
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/presets",
+		strings.NewReader(`{"name":"invalid","config":{"metadata_jobs":99}}`),
+	)
+	rr := httptest.NewRecorder()
+	s.handleSavePreset(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rr.Code, rr.Body.String())
+	}
+	var body map[string]any
+	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body["field"] != "metadata_jobs" {
+		t.Fatalf("unexpected response: %v", body)
+	}
+}
+
 // TestHandlePresetHandlers_ReturnValidationStyleErrors는 테스트 코드 동작을 검증하거나 보조합니다.
 func TestHandlePresetHandlers_ReturnValidationStyleErrors(t *testing.T) {
 	// 필수 파라미터 누락 시 의미에 맞는 400 JSON 에러를 반환해야 한다.

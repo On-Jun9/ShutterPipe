@@ -57,6 +57,27 @@ type contextReader struct {
 	r   io.Reader
 }
 
+type contextReadSeeker struct {
+	ctx context.Context
+	r   io.ReadSeeker
+}
+
+func (r contextReadSeeker) Read(p []byte) (int, error) {
+	return contextReader{ctx: r.ctx, r: r.r}.Read(p)
+}
+
+func (r contextReadSeeker) Seek(offset int64, whence int) (int64, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+
+	position, err := r.r.Seek(offset, whence)
+	if ctxErr := r.ctx.Err(); ctxErr != nil {
+		return position, ctxErr
+	}
+	return position, err
+}
+
 func (r contextReader) Read(p []byte) (int, error) {
 	if err := r.ctx.Err(); err != nil {
 		return 0, err

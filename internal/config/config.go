@@ -16,6 +16,7 @@ type Config struct {
 	Dest              string                 `yaml:"dest" json:"dest"`
 	IncludeExtensions []string               `yaml:"include_extensions" json:"include_extensions"`
 	Jobs              int                    `yaml:"jobs" json:"jobs"`
+	MetadataJobs      int                    `yaml:"metadata_jobs" json:"metadata_jobs"`
 	DedupMethod       types.DedupMethod      `yaml:"dedup_method" json:"dedup_method"`
 	ConflictPolicy    types.ConflictPolicy   `yaml:"conflict_policy" json:"conflict_policy"`
 	OrganizeStrategy  types.OrganizeStrategy `yaml:"organize_strategy" json:"organize_strategy"`
@@ -49,6 +50,7 @@ func DefaultConfig() *Config {
 			"mp4", "mov", "avi", "mkv", "mxf", "xml",
 		},
 		Jobs:             jobs,
+		MetadataJobs:     2,
 		DedupMethod:      types.DedupMethodNameSize,
 		ConflictPolicy:   types.ConflictPolicySkip,
 		OrganizeStrategy: types.OrganizeByDate,
@@ -125,8 +127,8 @@ func (c *Config) Validate() error {
 		return err
 	}
 	// Jobs: 0 = auto (use CPU cores), 1..32 = explicit worker count.
-	if c.Jobs < 0 || c.Jobs > 32 {
-		return &ValidationError{Field: "jobs", Message: "must be between 0 and 32"}
+	if err := ValidateJobs(c.Jobs); err != nil {
+		return err
 	}
 	if c.Jobs == 0 {
 		c.Jobs = runtime.NumCPU()
@@ -135,6 +137,14 @@ func (c *Config) Validate() error {
 		} else if c.Jobs > 32 {
 			c.Jobs = 32
 		}
+	}
+	// MetadataJobs: 0 keeps backward compatibility with settings and presets
+	// created before this option existed; metadata analysis defaults to 2.
+	if err := ValidateMetadataJobs(c.MetadataJobs); err != nil {
+		return err
+	}
+	if c.MetadataJobs == 0 {
+		c.MetadataJobs = 2
 	}
 
 	homeDir, _ := os.UserHomeDir()
@@ -162,6 +172,20 @@ func (c *Config) Validate() error {
 		return &ValidationError{Field: "event_name", Message: "must be a folder name without path separators"}
 	}
 
+	return nil
+}
+
+func ValidateJobs(value int) error {
+	if value < 0 || value > 32 {
+		return &ValidationError{Field: "jobs", Message: "must be between 0 and 32"}
+	}
+	return nil
+}
+
+func ValidateMetadataJobs(value int) error {
+	if value < 0 || value > 32 {
+		return &ValidationError{Field: "metadata_jobs", Message: "must be between 0 and 32"}
+	}
 	return nil
 }
 

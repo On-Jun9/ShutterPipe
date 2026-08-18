@@ -506,6 +506,25 @@ func TestHandleSaveSettings_ReturnsValidationError(t *testing.T) {
 	}
 }
 
+func TestHandleSaveSettings_RejectsInvalidMetadataJobs(t *testing.T) {
+	s := &Server{}
+	t.Setenv("HOME", t.TempDir())
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/settings",
+		strings.NewReader(`{"source":"/tmp/source","dest":"/tmp/dest","metadata_jobs":99}`),
+	)
+	rr := httptest.NewRecorder()
+	s.handleSaveSettings(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d", rr.Code)
+	}
+	response := decodeValidationErrorResponse(t, rr)
+	if response.Field != "metadata_jobs" {
+		t.Fatalf("expected field metadata_jobs, got %s", response.Field)
+	}
+}
+
 // TestHandleSaveBookmarks_ReturnsValidationError는 테스트 코드 동작을 검증하거나 보조합니다.
 func TestHandleSaveBookmarks_ReturnsValidationError(t *testing.T) {
 	// 북마크 저장 API도 field=bookmarks를 유지해야 한다.

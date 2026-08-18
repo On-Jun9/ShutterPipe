@@ -39,6 +39,7 @@ func ConfigToPreset(cfg *Config, name, description string) *types.ConfigPreset {
 		Dest:              cfg.Dest,
 		IncludeExtensions: cfg.IncludeExtensions,
 		Jobs:              cfg.Jobs,
+		MetadataJobs:      cfg.MetadataJobs,
 		DedupMethod:       cfg.DedupMethod,
 		ConflictPolicy:    cfg.ConflictPolicy,
 		OrganizeStrategy:  cfg.OrganizeStrategy,
@@ -61,6 +62,9 @@ func PresetToConfig(preset *types.ConfigPreset) *Config {
 	cfg.Dest = preset.Dest
 	cfg.IncludeExtensions = preset.IncludeExtensions
 	cfg.Jobs = preset.Jobs
+	if preset.MetadataJobs > 0 {
+		cfg.MetadataJobs = preset.MetadataJobs
+	}
 	cfg.DedupMethod = preset.DedupMethod
 	cfg.ConflictPolicy = preset.ConflictPolicy
 	cfg.OrganizeStrategy = preset.OrganizeStrategy
@@ -79,6 +83,12 @@ func PresetToConfig(preset *types.ConfigPreset) *Config {
 func (pm *PresetManager) SavePreset(preset *types.ConfigPreset) error {
 	if preset.Name == "" {
 		return fmt.Errorf("preset name cannot be empty")
+	}
+	if err := ValidateJobs(preset.Jobs); err != nil {
+		return err
+	}
+	if err := ValidateMetadataJobs(preset.MetadataJobs); err != nil {
+		return err
 	}
 
 	filename := filepath.Join(pm.presetsDir, preset.Name+".json")

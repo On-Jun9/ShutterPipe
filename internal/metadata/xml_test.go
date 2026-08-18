@@ -148,6 +148,42 @@ func TestExtractFromSidecarUsesIdentitySnapshot(t *testing.T) {
 	}
 }
 
+func TestExtractFromSidecarWithContext_StopsWhenCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	meta := ExtractFromSidecarWithContext(ctx, SidecarIdentityInfo{Content: []byte("<NonRealTimeMeta/>")})
+	if !strings.Contains(meta.Error, context.Canceled.Error()) {
+		t.Fatalf("expected cancellation error, got %q", meta.Error)
+	}
+}
+
+func TestSidecarIdentity_RejectsOversizedXML(t *testing.T) {
+	tmpDir := t.TempDir()
+	videoPath := filepath.Join(tmpDir, "clip.mp4")
+	sidecarPath := filepath.Join(tmpDir, "clipM01.XML")
+	if err := os.WriteFile(videoPath, []byte("video"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.Create(sidecarPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(maxXMLMetadataSize + 1); err != nil {
+		file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	_, ok, err := SidecarIdentity(context.Background(), types.FileEntry{
+		Path: videoPath, Extension: "mp4", IsVideo: true,
+	})
+	if err == nil || ok || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("expected oversized sidecar error, got ok=%v err=%v", ok, err)
+	}
+}
+
 // TestXMLExtractor_Extract_ReturnsReadError는 테스트 코드 동작을 검증하거나 보조합니다.
 func TestXMLExtractor_Extract_ReturnsReadError(t *testing.T) {
 	// XML 경로가 디렉터리면 read 에러를 반환해야 한다.

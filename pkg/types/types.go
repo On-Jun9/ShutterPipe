@@ -205,6 +205,7 @@ type ConfigPreset struct {
 	Dest              string           `json:"dest,omitempty"`
 	IncludeExtensions []string         `json:"include_extensions"`
 	Jobs              int              `json:"jobs"`
+	MetadataJobs      int              `json:"metadata_jobs"`
 	DedupMethod       DedupMethod      `json:"dedup_method"`
 	ConflictPolicy    ConflictPolicy   `json:"conflict_policy"`
 	OrganizeStrategy  OrganizeStrategy `json:"organize_strategy"`
@@ -233,6 +234,7 @@ type UserSettings struct {
 	DateFilterStart   string           `json:"date_filter_start,omitempty"`
 	DateFilterEnd     string           `json:"date_filter_end,omitempty"`
 	Jobs              int              `json:"jobs"`
+	MetadataJobs      int              `json:"metadata_jobs"`
 	IncludeExtensions []string         `json:"include_extensions"`
 	UnclassifiedDir   string           `json:"unclassified_dir"`
 	QuarantineDir     string           `json:"quarantine_dir"`
@@ -279,6 +281,7 @@ type BackupConfig struct {
 	DateFilterStart   string           `json:"date_filter_start,omitempty"`
 	DateFilterEnd     string           `json:"date_filter_end,omitempty"`
 	Jobs              int              `json:"jobs"`
+	MetadataJobs      int              `json:"metadata_jobs"`
 	IncludeExtensions []string         `json:"include_extensions"`
 	UnclassifiedDir   string           `json:"unclassified_dir"`
 	QuarantineDir     string           `json:"quarantine_dir"`
