@@ -17,8 +17,11 @@ include_extensions:
   - avi
   - mkv
   - mxf
+  - xml
 
 jobs: 0
+
+metadata_jobs: 2
 
 dedup_method: name-size
 
@@ -28,9 +31,9 @@ unclassified_dir: unclassified
 
 quarantine_dir: quarantine
 
-state_file: ~/.shutterpipe/state.json
+state_file: /absolute/path/to/.shutterpipe/state.json
 
-log_file: ~/.shutterpipe/shutterpipe.log
+log_file: /absolute/path/to/.shutterpipe/shutterpipe.log
 
 log_json: false
 
